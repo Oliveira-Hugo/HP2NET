@@ -197,117 +197,116 @@
 },
 
 "interfaces": [
-{
-"producer": "RAxML",
-"output": "gene trees",
-"consumer": "ASTRAL",
-"input": "gene trees",
-"supported": true,
-"used_by": [
-"RAxML-SNaQ"
-]
-},
-
-{
-  "producer": "RAxML",
-  "output": "gene trees",
-  "transform": "root_tree",
-  "consumer": "PhyloNet",
-  "input": "rooted gene trees",
-  "supported": true,
-  "used_by": [
-    "RAxML-PhyloNet"
-  ]
-},
-
-{
-  "producer": "IQ-TREE",
-  "output": "gene trees",
-  "consumer": "ASTRAL",
-  "input": "gene trees",
-  "supported": true,
-  "used_by": [
-    "IQTREE-SNaQ"
-  ]
-},
-
-{
-  "producer": "IQ-TREE",
-  "output": "gene trees",
-  "transform": "root_tree",
-  "consumer": "PhyloNet",
-  "input": "rooted gene trees",
-  "supported": true,
-  "used_by": [
-    "IQTREE-PhyloNet"
-  ]
-},
-
-{
-  "producer": "MrBayes",
-  "output": "Bayesian gene tree results",
-  "consumer": "MBSUM",
-  "input": "MrBayes output",
-  "supported": true,
-  "used_by": [
-    "MrBayes-SNaQ"
-  ]
-},
-
-{
-  "producer": "MBSUM",
-  "output": "summarized tree data",
-  "consumer": "BUCKy",
-  "input": "MBSUM-derived tree data",
-  "supported": true,
-  "used_by": [
-    "MrBayes-SNaQ"
-  ]
-},
-
-{
-  "producer": "BUCKy",
-  "output": "concordance information",
-  "consumer": "Quartet MaxCut",
-  "input": "concordance information",
-  "supported": true,
-  "used_by": [
-    "MrBayes-SNaQ"
-  ]
-},
-
-{
-  "producer": "Quartet MaxCut",
-  "output": "species tree",
-  "consumer": "SNaQ",
-  "input": "tree information",
-  "supported": true,
-  "used_by": [
-    "MrBayes-SNaQ"
-  ]
-},
-
-{
-  "producer": "ASTRAL",
-  "output": "species tree",
-  "consumer": "SNaQ",
-  "input": "species tree information",
-  "supported": true,
-  "used_by": [
-    "RAxML-SNaQ",
-    "IQTREE-SNaQ"
-  ]
-},
-
-{
-  "producer": "ASTRAL",
-  "output": "species tree",
-  "consumer": "PhyloNet",
-  "input": "rooted gene trees",
-  "supported": false,
-  "reason": "No ASTRAL-to-PhyloNet interface is implemented in HP2Net."
-}
-
+  {
+    "producer": "RAxML",
+    "output": "gene trees",
+    "consumer": "ASTRAL",
+    "input": "gene trees",
+    "supported": true,
+    "used_by": [
+      "RAxML-SNaQ"
+    ]
+  },
+  {
+    "producer": "RAxML",
+    "output": "gene trees",
+    "consumer": "root_tree",
+    "input": "gene trees",
+    "supported": true,
+    "used_by": [
+      "RAxML-PhyloNet"
+    ]
+  },
+  {
+    "producer": "root_tree",
+    "output": "rooted gene trees",
+    "consumer": "PhyloNet",
+    "input": "rooted gene trees",
+    "supported": true,
+    "used_by": [
+      "RAxML-PhyloNet",
+      "IQTREE-PhyloNet"
+    ]
+  },
+  {
+    "producer": "IQ-TREE",
+    "output": "gene trees",
+    "consumer": "ASTRAL",
+    "input": "gene trees",
+    "supported": true,
+    "used_by": [
+      "IQTREE-SNaQ"
+    ]
+  },
+  {
+    "producer": "IQ-TREE",
+    "output": "gene trees",
+    "consumer": "root_tree",
+    "input": "gene trees",
+    "supported": true,
+    "used_by": [
+      "IQTREE-PhyloNet"
+    ]
+  },
+  {
+    "producer": "MrBayes",
+    "output": "Bayesian gene tree results",
+    "consumer": "MBSUM",
+    "input": "MrBayes output",
+    "supported": true,
+    "used_by": [
+      "MrBayes-SNaQ"
+    ]
+  },
+  {
+    "producer": "MBSUM",
+    "output": "summarized tree data",
+    "consumer": "BUCKy",
+    "input": "MBSUM-derived tree data",
+    "supported": true,
+    "used_by": [
+      "MrBayes-SNaQ"
+    ]
+  },
+  {
+    "producer": "BUCKy",
+    "output": "concordance information",
+    "consumer": "Quartet MaxCut",
+    "input": "concordance information",
+    "supported": true,
+    "used_by": [
+      "MrBayes-SNaQ"
+    ]
+  },
+  {
+    "producer": "Quartet MaxCut",
+    "output": "species tree",
+    "consumer": "SNaQ",
+    "input": "tree information",
+    "supported": true,
+    "used_by": [
+      "MrBayes-SNaQ"
+    ]
+  },
+  {
+    "producer": "ASTRAL",
+    "output": "species tree",
+    "consumer": "SNaQ",
+    "input": "species tree information",
+    "supported": true,
+    "used_by": [
+      "RAxML-SNaQ",
+      "IQTREE-SNaQ"
+    ]
+  },
+  {
+    "producer": "ASTRAL",
+    "output": "species tree",
+    "consumer": "PhyloNet",
+    "input": "rooted gene trees",
+    "supported": false,
+    "reason": "No ASTRAL-to-PhyloNet interface is implemented in HP2Net."
+  }
 ],
 
 "constraints": {
