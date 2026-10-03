@@ -1,6 +1,27 @@
 # High Performance Phylogenetic Network (HP2NET) framework
 ### Framework for construction of phylogenetic networks on High Performance Computing (HPC) environment
 
+## This fork: LLM-based workflow planning
+
+This fork extends HP2NET with an LLM-based scientific workflow planner (preliminary implementation). The agent translates natural-language phylogenetic requests into structured sequences of HP2NET tools and validates the proposed workflow against the available tools, workflow compositions, and interfaces described in the `knowledge/` directory.
+
+The original HP2NET workflows remain unchanged. The main addition is `phylo_agent.py`, together with the HP2NET knowledge base in `knowledge/hp2net_knowledge.json`.
+
+### Running the workflow planner
+
+The planner requires a local [Ollama](https://ollama.com/) installation with the configured model available. By default, it uses:
+
+```python
+MODEL = "llama3.1:8b"
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+```
+From the project root, run:
+
+```python
+python3 phylo_agent.py
+```
+The planner receives a natural-language scientific request, uses the HP2NET knowledge base to identify relevant tools and workflows, asks the local LLM to construct the workflow, and validates the resulting sequence against the documented HP2NET capabilities.
+
 ## Introduction
 
 Phylogeny refers to the evolutionary history and relationship between biological lineages related by common descent. Reticulate evolution refers to the origination of lineages through the complete or partial merging of ancestor lineages. Networks may be used to represent lineage independence events in non-treelike phylogenetic processes.
