@@ -1,0 +1,3297 @@
+======================================================================
+FILE: apps.py
+======================================================================
+
+# -*- coding: utf-8 -*-
+
+""" Apps.py. Parsl Application Functions (@) 2021
+
+This module encapsulates all Parsl configuration stuff in order to provide a
+cluster configuration based in number of nodes and cores per node.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+
+# COPYRIGHT SECTION
+__author__ = "Diego Carvalho"
+__copyright__ = "Copyright 2021, The Biocomp Informal Collaboration (CEFET/RJ and LNCC)"
+__credits__ = ["Diego Carvalho", "Carla Osthoff", "Kary Ocaña", "Rafael Terra"]
+__license__ = "GPL"
+__version__ = "1.0.1"
+__maintainer__ = "Rafael Terra"
+__email__ = "rafaelst@posgrad.lncc.br"
+__status__ = "Research"
+
+
+#
+# Parsl Bash and Python Applications
+#
+import parsl
+from appsexception import FileCreationError, FolderDeletionError
+from bioconfig import BioConfig
+from typing import Any
+from utils import app_reuse, Cache
+
+
+# setup_phylip_data bash app
+@parsl.python_app(executors=['single_partition'])
+def setup_phylip_data(basedir: dict, config: BioConfig,
+                      stderr=parsl.AUTO_LOGNAME,
+                      stdout=parsl.AUTO_LOGNAME):
+    """Extract the sequence alignments tar file and convert the gene alignments from the nexus format to the phylip format.
+
+    Parameters:
+            basedir: it is going to search for a tar file with nexus files. The script will create:
+            seqdir=input/nexus
+            seqdir=input/phylip
+    Returns:
+        returns an parsl's AppFuture.
+
+    Raises:
+        PhylipMissingData --- if cannot find a tar file with nexus files.
+
+
+    TODO: Provide provenance.
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, glob, tarfile, logging, tarfile, shutil, re
+    from Bio import AlignIO
+    from pathlib import Path
+    from appsexception import AlignmentConversion
+
+    logging.info(f'Converting Nexus files to Phylip on {basedir["dir"]}')
+    input_dir = os.path.join(basedir['dir'], 'input')
+    sequence_dir = os.path.join(input_dir, 'sequence')
+    input_format = 0
+    # First the sequences are extracted
+    Path(sequence_dir).mkdir(exist_ok=True)
+    if os.path.exists(sequence_dir):
+        tar_file = basedir['sequences']
+        tar = tarfile.open(tar_file, "r:gz")
+        tar.extractall(path=sequence_dir)
+    # Now one file is opened to check its format
+    sequences = glob.glob(os.path.join(sequence_dir, '*'))
+    if len(sequences) == 0:
+        raise AlignmentConversion(input_phylip_dir)
+    with open(sequences[0], 'r') as s_file:
+        line = s_file.readline()
+        if "#NEXUS" in line:
+            input_format = 0 # nexus
+        elif ">" in line:
+            input_format = 1 # fasta
+        elif len(re.findall(r'\d+\s\d+', line)) > 0:
+            input_format = 2 # other .i.e. phylip
+
+    input_nexus_dir = os.path.join(input_dir, 'nexus')
+    input_phylip_dir = os.path.join(input_dir, 'phylip')
+    input_fasta_dir = os.path.join(input_dir, 'fasta')
+    # So, some work must be done. Build the Nexus directory
+    if not os.path.isdir(input_nexus_dir):
+        Path(input_nexus_dir).mkdir(exist_ok=True)
+    if not os.path.isdir(input_phylip_dir):
+        Path(input_phylip_dir).mkdir(exist_ok=True)
+    if not os.path.isdir(input_fasta_dir):
+        Path(input_fasta_dir).mkdir(exist_ok=True)
+    # Now, use the function to convert nexus to phylip.
+    files = glob.glob(os.path.join(sequence_dir,'*'))
+    try:
+        for f in files:
+            out_name = os.path.basename(f).split('.')[0]
+            if input_format == 0:
+                AlignIO.convert(f, "nexus", os.path.join(input_phylip_dir, f'{out_name}.phy'), "phylip-sequential", molecule_type = "DNA")
+                AlignIO.convert(f, "nexus", os.path.join(input_fasta_dir, f'{out_name}.fasta'), "fasta", molecule_type = "DNA")
+                shutil.copyfile(f, os.path.join(input_nexus_dir, os.path.basename(f)))
+            if input_format == 1:
+                AlignIO.convert(f, "fasta", os.path.join(input_phylip_dir, f'{out_name}.phy'), "phylip-sequential", molecule_type = "DNA")
+                AlignIO.convert(f, "fasta", os.path.join(input_nexus_dir, f'{out_name}.nex'), "nexus", molecule_type = "DNA")
+                shutil.copyfile(f, os.path.join(input_fasta_dir, os.path.basename(f)))
+            if input_format == 2:
+                AlignIO.convert(f, "phylip-sequential", os.path.join(input_nexus_dir, f'{out_name}.nex'), "nexus", molecule_type = "DNA")
+                AlignIO.convert(f, "phylip-sequential", os.path.join(input_fasta_dir, f'{out_name}.fasta'), "fasta", molecule_type = "DNA")
+                shutil.copyfile(f, os.path.join(input_phylip_dir, os.path.basename(f)))
+    except Exception as e:
+        raise AlignmentConversion(basedir=basedir['dir'])
+    return
+
+
+# raxml bash app
+@app_reuse(cache=Cache(), args_to_ignore=["basedir", "config", "stderr", "stdout", "next_pipe"])
+@parsl.bash_app(executors=['single_partition'])
+def raxml(basedir: dict, 
+          config: BioConfig,
+          input_file: str,
+          inputs=[],
+          next_pipe: Any = None,
+          stderr=parsl.AUTO_LOGNAME,
+          stdout=parsl.AUTO_LOGNAME,
+          seed = None):
+    """Runs the Raxml's executable on a sequence alignment in phylip format
+    Parameters:
+        basedir: current working directory
+        input_file: a sequence alignment in phylip format
+
+    Returns:
+        an parsl's AppFuture
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, random, logging
+    num_threads = config.raxml_threads
+    raxml_exec = config.raxml
+    logging.info(f'Raxml called with {basedir["dir"]}')
+    raxml_dir = os.path.join(basedir['dir'], config.raxml_dir)
+
+    # TODO: Create the following parameters(external configuration): -m, -N,
+
+    if seed is not None:
+        p = seed
+        x = seed
+    else:
+        p = random.randint(1, 10000)
+        x = random.randint(1, 10000)
+    params = f"-T {num_threads} -p {p} -x {x} -f a -m {config.raxml_model} -N {config.bootstrap}"
+    output_file = os.path.splitext(os.path.basename(input_file))[0]
+    # Return to Parsl to be executed on the workflow
+    return f"cd {raxml_dir}; {raxml_exec} {params} -s {input_file} -n {output_file}"
+
+
+@app_reuse(cache=Cache(), args_to_ignore=["basedir", "config", "stderr", "stdout"])
+@parsl.python_app(executors=['single_partition'])
+def setup_tree_output(basedir: dict,
+                      config: BioConfig,
+                      inputs=[],
+                      outputs=[],
+                      stderr=parsl.AUTO_LOGNAME,
+                      stdout=parsl.AUTO_LOGNAME):
+    """Create the phylogenetic tree software (raxml, iqtree,...) best tree file and organize the temporary files to subsequent softwares 
+
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: 
+        Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, glob, tarfile, logging
+    from pathlib import Path
+    from appsexception import FolderCreationError, FolderDeletionError, FileCreationError
+    work_dir = basedir['dir']
+    tree_method = basedir['tree_method']
+    logging.info(f'Setting up the tree output on {work_dir}')
+    if(tree_method == "RAXML"):
+        raxml_dir = os.path.join(work_dir, config.raxml_dir)
+        bootstrap_dir = os.path.join(raxml_dir, "bootstrap")
+        besttree_file = os.path.join(raxml_dir, config.raxml_output)
+        try:
+            Path(bootstrap_dir).mkdir(exist_ok=True)
+        except Exception:
+            raise FolderCreationError(bootstrap_dir)
+        old_files = glob.glob(f'{bootstrap_dir}/*')
+        try:
+            for f in old_files:
+                os.remove(f)
+        except Exception:
+            raise FolderDeletionError(bootstrap_dir)
+        try:
+            files = glob.glob(os.path.join(raxml_dir,'RAxML_bootstrap.*'))
+            for f in files:
+                os.rename(f, os.path.join(bootstrap_dir, os.path.basename(f)))
+            # compress and remove the bootstrap files
+            with tarfile.open(os.path.join(raxml_dir, "contrees.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(raxml_dir,'RAxML_bipartitions.*'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            raxml_input = open(besttree_file, 'w')
+            files = glob.glob(os.path.join(raxml_dir, 'RAxML_bestTree.*'))
+            trees = ""
+            for f in files:
+                gen_tree = open(f, 'r')
+                trees += gen_tree.readline()
+                gen_tree.close()
+            raxml_input.write(trees)
+            raxml_input.close()
+            with tarfile.open(os.path.join(raxml_dir, "besttrees.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(raxml_dir, 'RAxML_bestTree.*'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(raxml_dir, "bipartitionsBranchLabels.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(raxml_dir, 'RAxML_bipartitionsBranchLabels.*'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(raxml_dir, "info.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(raxml_dir, 'RAxML_info.*'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+        except IOError:
+            raise FileCreationError(raxml_dir)
+    elif(tree_method == "IQTREE"):
+        phylip_dir = os.path.join(work_dir, os.path.join("input", "phylip"))
+        iqtree_dir = os.path.join(work_dir, config.iqtree_dir)
+        besttree_file = os.path.join(iqtree_dir, config.iqtree_output)
+        try:
+            files = glob.glob(os.path.join(phylip_dir, '*.iqtree'))
+            files += glob.glob(os.path.join(phylip_dir, '*.treefile'))
+            files += glob.glob(os.path.join(phylip_dir, '*.mldist'))
+            files += glob.glob(os.path.join(phylip_dir, '*.nex'))
+            files += glob.glob(os.path.join(phylip_dir, '*.contree'))
+            files += glob.glob(os.path.join(phylip_dir, '*.log'))
+            files += glob.glob(os.path.join(phylip_dir, '*.ckp.gz'))
+            files += glob.glob(os.path.join(phylip_dir, '*.bionj'))
+            #files += glob.glob(os.path.join(phylip_dir, '*.reduced'))
+            #files += glob.glob(os.path.join(phylip_dir, '*.boottrees'))
+            files += glob.glob(os.path.join(phylip_dir, '*.ufboot'))
+            for f in files:
+                new_f = os.path.join(iqtree_dir, os.path.basename(f))
+                os.replace(f, new_f)
+            iq_input = open(besttree_file, 'w+')
+            files = glob.glob(os.path.join(iqtree_dir, '*.treefile'))
+            trees = ""
+            for f in files:
+                gen_tree = open(f, 'r')
+                trees += gen_tree.readline()
+                gen_tree.close()
+            iq_input.write(trees)
+            iq_input.close()
+        except IOError:
+            raise FileCreationError(iqtree_dir)
+        bootstrap_dir = os.path.join(iqtree_dir, "bootstrap")
+        try:
+            Path(bootstrap_dir).mkdir(exist_ok=True)
+        except Exception:
+            raise FolderCreationError(bootstrap_dir)
+        old_files = glob.glob(f'{bootstrap_dir}/*')
+        try:
+            for f in old_files:
+                os.remove(f)
+        except Exception:
+            raise FolderDeletionError(bootstrap_dir)
+        try:
+            with tarfile.open(os.path.join(iqtree_dir, "iqtree.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(iqtree_dir,'*.iqtree'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(iqtree_dir, "treefile.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(iqtree_dir,'*.treefile'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(iqtree_dir, "mldist.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(iqtree_dir,'*.mldist'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(iqtree_dir, "nex.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(iqtree_dir,'*.nex'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(iqtree_dir, "contree.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(iqtree_dir,'*.contree'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(iqtree_dir, "log.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(iqtree_dir,'*.log'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(iqtree_dir, "ckp.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(iqtree_dir,'*.ckp.gz'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(iqtree_dir, "bionj.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(iqtree_dir,'*.bionj.gz'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            with tarfile.open(os.path.join(iqtree_dir, "reduced.tgz"), "w:gz") as tar:
+                files = glob.glob(os.path.join(iqtree_dir,'*.reduced.gz'))
+                for f in files:
+                    tar.add(f, arcname=os.path.basename(f))
+                for f in files:
+                    os.remove(f)
+            files = glob.glob(os.path.join(iqtree_dir,'*.ufboot'))
+            for f in files:
+                os.rename(f, os.path.join(bootstrap_dir, os.path.basename(f)))
+        except:
+            raise FileCreationError(iqtree_dir)
+    return
+
+@app_reuse(cache=Cache(), args_to_ignore=["basedir", "config", "stderr", "stdout"])
+@parsl.python_app(executors=['single_partition'])
+def root_tree(basedir: dict,
+              config: BioConfig,
+              inputs=[],
+              outputs=[],
+              stderr=parsl.AUTO_LOGNAME,
+              stdout=parsl.AUTO_LOGNAME):
+    """Opens the best tree file from raxml or iqtree and root all the trees according to an outgroup 
+
+    Parameters:
+        basedir: current working directory
+    TODO: 
+        Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    from Bio import Phylo
+    import os
+    tree_method = basedir['tree_method']
+    work_dir = basedir['dir']
+    outgroup = basedir['outgroup']
+    buffer = ""
+    if tree_method == "RAXML":
+        tree_dir = os.path.join(work_dir, config.raxml_dir)
+        tree_path = os.path.join(tree_dir, config.raxml_output)
+        try:
+            trees = Phylo.parse(tree_path, "newick")
+            for tree in trees:
+                tree.root_with_outgroup(outgroup)
+                buffer+=tree.format("newick")
+            with open(os.path.join(tree_dir, config.raxml_rooted_output), 'w') as out:
+                out.write(buffer)  
+                out.close() 
+        except:
+            pass
+    if tree_method == "IQTREE":
+        tree_dir = os.path.join(work_dir, config.iqtree_dir)
+        tree_path = os.path.join(tree_dir, config.iqtree_output)
+        try:
+            trees = Phylo.parse(tree_path, "newick")
+            for tree in trees:
+                tree.root_with_outgroup(outgroup)
+                buffer+=tree.format("newick")
+            with open(os.path.join(tree_dir, config.iqtree_rooted_output), 'w') as out:
+                out.write(buffer)    
+                out.close()
+        except:
+            pass
+    return
+        
+@parsl.bash_app(executors=['single_partition'])
+def astral(basedir: dict,
+           config: BioConfig,
+           inputs=[],
+           outputs=[],
+           stderr=parsl.AUTO_LOGNAME,
+           stdout=parsl.AUTO_LOGNAME,
+           seed = None):
+    """Runs the Astral's executable using the besttree file and create the species tree in the astral folder
+
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import glob, os, logging
+    from pathlib import Path
+    work_dir = basedir['dir']
+    tree_method = basedir['tree_method']
+    mapping = basedir['mapping']
+    logging.info(f'ASTRAL called with {work_dir}')
+    astral_dir = os.path.join(work_dir,config.astral_dir)
+    exec_astral = config.astral
+    tree_output = ""
+    astral_output = ""
+    if(tree_method == "RAXML"):
+        try:
+            astral_raxml = os.path.join(astral_dir, config.raxml_dir)
+            Path(astral_raxml).mkdir(exist_ok=True)
+        except Exception:
+            print("Failed to create the raxml bootstrap folder!")
+        bs_file = os.path.join(astral_raxml,'BSlistfiles')
+        raxm_dir = os.path.join(work_dir, config.raxml_dir)
+        tree_output = os.path.join(raxm_dir,config.raxml_output)
+        boot_strap = os.path.join(os.path.join(work_dir,config.raxml_dir),"bootstrap/*")
+        with open(bs_file, 'w') as f:
+            for i in glob.glob(boot_strap):
+                f.write(f'{i}\n')
+        astral_output = os.path.join(astral_raxml, config.astral_output)
+    elif(tree_method == "IQTREE"):
+        try:
+            astral_iqtree = os.path.join(astral_dir, config.iqtree_dir)
+            Path(astral_iqtree).mkdir(exist_ok=True)
+        except Exception:
+            print("Failed to create the raxml bootstrap folder!")
+        bs_file = os.path.join(astral_iqtree,'BSlistfiles')
+        iqtree_dir = os.path.join(work_dir, config.iqtree_dir)
+        tree_output = os.path.join(iqtree_dir,config.iqtree_output)
+        boot_strap = os.path.join(os.path.join(work_dir,config.iqtree_dir),"bootstrap/*")
+        with open(bs_file, 'w') as f:
+            for i in glob.glob(boot_strap):
+                f.write(f'{i}\n')
+        astral_output = os.path.join(astral_iqtree, config.astral_output)
+    # Return to Parsl to be executed on the workflow
+    params = f'-i {tree_output} -b {bs_file} -r {config.bootstrap} -o {astral_output}'
+    if len(mapping) > 0:
+        map_filename = os.path.join(astral_dir, 'mapping.dat')
+        with open(map_filename, 'w') as map_:
+            species = mapping.split(';')
+            for specie in species:
+                map_.write(specie.strip() + '\n')
+            map_.close()
+        return f'{exec_astral} -i {tree_output} -b {bs_file} -r {config.bootstrap} -a {map_filename} -o {astral_output}'
+    else:
+        return f'{exec_astral} -i {tree_output} -b {bs_file} -r {config.bootstrap} -o {astral_output}'
+
+@parsl.bash_app(executors=['single_partition'])
+def snaq(basedir: dict,
+        config: BioConfig,
+        hmax: str,
+        inputs=[],
+        outputs=[],
+        next_pipe: Any = None,
+        stderr=parsl.AUTO_LOGNAME,
+        stdout=parsl.AUTO_LOGNAME,
+        seed = None):
+    """Runs the phylonetwork algorithm (snaq) and create the phylogenetic network in newick format
+
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    # set environment variables
+    import os, logging
+    from pathlib import Path
+    work_dir = basedir['dir']
+    tree_method = basedir['tree_method']
+    outgroup = basedir['outgroup']
+    mapping = basedir['mapping']
+    logging.info(f'SNAQ called with {work_dir}')
+    # run the julia script with PhyloNetworks
+    snaq_exec = os.path.join(config.script_dir, config.snaq)
+    num_threads = config.snaq_threads
+    output_folder = os.path.join(work_dir, config.snaq_dir)
+    runs = config.snaq_runs
+    if tree_method == "RAXML":
+        raxml_tree = os.path.join(os.path.join(work_dir, config.raxml_dir), config.raxml_output)
+        astral_tree = os.path.join(work_dir, os.path.join(config.astral_dir, config.raxml_dir))
+        astral_tree = os.path.join(astral_tree, config.astral_output)
+        if len(mapping) > 0:
+            return f'julia {snaq_exec} {tree_method} {raxml_tree} {astral_tree} {output_folder} {num_threads} {hmax} {runs} \'{mapping}\''
+        else:
+            return f'julia {snaq_exec} {tree_method} {raxml_tree} {astral_tree} {output_folder} {num_threads} {hmax} {runs}'
+    elif tree_method == "IQTREE":
+        iqtree_tree = os.path.join(os.path.join(work_dir, config.iqtree_dir), config.iqtree_output)
+        astral_tree = os.path.join(work_dir, os.path.join(config.astral_dir,config.iqtree_dir))
+        astral_tree = os.path.join(astral_tree, config.astral_output)
+        if len(mapping) > 0:
+            return f'julia {snaq_exec} {tree_method} {iqtree_tree} {astral_tree} {output_folder} {num_threads} {hmax} {runs} \'{mapping}\''
+        else:
+            return f'julia {snaq_exec} {tree_method} {iqtree_tree} {astral_tree} {output_folder} {num_threads} {hmax} {runs}'
+    elif tree_method == "MRBAYES":
+        dir_name = os.path.basename(work_dir)
+        qmc_output = os.path.join(os.path.join(work_dir, config.quartet_maxcut_dir), f'{dir_name}.tre')
+        bucky_folder = os.path.join(work_dir, config.bucky_dir)
+        bucky_table = os.path.join(bucky_folder, f"{dir_name}.csv")
+        #mrbayes flow doesn't support mapping
+        return f'julia {snaq_exec} {tree_method} {bucky_table} {qmc_output} {output_folder} {num_threads} {hmax} {runs}'
+    else:
+        return
+
+@parsl.python_app(executors=['single_partition'])
+def prepare_prunetrees(basedir: dict,
+                       config: BioConfig,
+                       input_file: str,
+                       inputs=[],
+                       stderr=parsl.AUTO_LOGNAME,
+                       stdout=parsl.AUTO_LOGNAME):
+    import os, glob
+    bucky_folder = os.path.join(basedir['dir'], "bucky")
+    prune_trees = glob.glob(os.path.join(bucky_folder, "*.txt"))
+    return prune_trees
+
+# Mr.Bayes bash app
+
+
+@parsl.bash_app(executors=['single_partition'])
+def mrbayes(basedir: dict,
+            config: BioConfig,
+            input_file: str,
+            inputs=[],
+            stderr=parsl.AUTO_LOGNAME,
+            stdout=parsl.AUTO_LOGNAME,
+            seed = None):
+    """Runs the Mr. Bayes' executable on a sequence alignment file
+
+    Parameters:
+        input_file
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, logging
+    from pathlib import Path
+    work_dir = basedir['dir']
+    logging.info(f'MrBayes called with {work_dir}')
+    gene_name = os.path.basename(input_file)
+    mb_folder = os.path.join(work_dir, config.mrbayes_dir)
+    gene_file = open(input_file, 'r')
+    gene_string = gene_file.read()
+    gene_file.close()
+    # open the gene alignment file, read its contents and create a new file with mrbayes parameters
+    gene_par = open(os.path.join(mb_folder, gene_name), 'w+')
+    gene_par.write(gene_string)
+    par = f"begin mrbayes;\nset nowarnings=yes;\nset autoclose=yes;\nlset nst=2;\n{config.mrbayes_parameters};\nmcmc;\nsumt;\nend;"
+    if seed is not None:
+        par = f"begin mrbayes;\nset nowarnings=yes;\nset autoclose=yes;\nlset nst=2;\n{config.mrbayes_parameters};\nSeed={seed};\nmcmc;\nsumt;\nend;"
+    gene_par.write(par)
+    return f"{config.mrbayes} {os.path.join(mb_folder, gene_name)}"
+
+# mbsum bash app
+
+
+@parsl.bash_app(executors=['single_partition'])
+def mbsum(basedir: dict,
+          config: BioConfig,
+          input_file: str,
+          inputs=[],
+          stderr=parsl.AUTO_LOGNAME,
+          stdout=parsl.AUTO_LOGNAME,
+          seed = None):
+    """Runs the mbsum's executable on the Mr.Bayes output for a certain sequence alignment
+
+    Parameters:
+        basedir: current working directory
+        input_file: a sequence alignment in nexus format
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, re, glob, logging
+    from pathlib import Path
+    work_dir = basedir['dir']
+    logging.info(f'MBSUM called with {work_dir}')
+    gene_name = os.path.basename(input_file)
+    mbsum_folder = os.path.join(work_dir, config.mbsum_dir)
+    mrbayes_folder = os.path.join(work_dir, config.mrbayes_dir)
+    # get the mrbayes parameters
+    par_0 = str(config.mrbayes_parameters).split("mcmcp",1)[1]
+    par = par_0.split(' ')
+    par_dir = {}
+    for p in par:
+        p_split = p.split('=')
+        if len(p_split) > 1:
+            par_dir[p_split[0]] = float(p_split[1])
+    trim = (((par_dir['ngen']/par_dir['samplefreq']) *
+            par_dir['nruns']*par_dir['burninfrac'])/par_dir['nruns']) + 1
+    # select all the mrbayes .t files of the gene alignment file
+    trees = glob.glob(os.path.join(mrbayes_folder, gene_name + '*.t'))
+    params = f"{(' ').join(trees)} -n {trim} -o {os.path.join(mbsum_folder, gene_name + '.sum')}"
+    return f"{config.mbsum} {params}"
+
+
+@parsl.python_app(executors=['single_partition'])
+def setup_bucky_data(basedir: dict,
+                     config: BioConfig,
+                     inputs=[],
+                     stderr=parsl.AUTO_LOGNAME,
+                     stdout=parsl.AUTO_LOGNAME):
+    """Prepares bucky's input, creating a prune tree for each selected quartet
+
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import re, os, glob, logging
+    from pathlib import Path
+    from itertools import combinations
+    work_dir = basedir['dir']
+    logging.info(f'Setting up bucky data in {work_dir}')
+    mbsum_folder = os.path.join(work_dir, config.mbsum_dir)
+    bucky_folder = os.path.join(work_dir, config.bucky_dir)
+    # parse the sumarized taxa by mbsum
+    files = glob.glob(os.path.join(mbsum_folder, '*.sum'))
+    taxa = {}
+    selected_taxa = {}
+    pattern = re.compile(r'translate(\n\s*\d+\s+\w+(,|;))+')
+    taxa_pattern = re.compile(r'(\w+(,|;))')
+    for file in files:
+        gene_sum = open(file, 'r')
+        text = gene_sum.read()
+        gene_sum.close()
+        translate_block = pattern.search(text)
+        for match in re.findall(taxa_pattern, translate_block[0]):
+            key = re.sub(re.compile(r'(,|;)'), '', match[0])
+            if key in taxa:
+                taxa[key] += 1
+            else:
+                taxa[key] = 1
+    # select the taxa shared across all genes
+    for t in taxa:
+        if(taxa[t] == len(files)):
+            selected_taxa[t] = t
+    # create all the selected quartets combinations
+    quartets = combinations(selected_taxa, 4)
+    for quartet in quartets:
+        prune_tree_output = "translate\n"
+        count = 0
+        filename = ""
+        for member in tuple(quartet):
+            filename += member
+            count += 1
+            prune_tree_output += f" {count} {member}"
+            if count == 4:
+                prune_tree_output += ";\n"
+            else:
+                filename += "--"
+                prune_tree_output += ",\n"
+        # create the prune tree file necessary for bucky
+        prune_file_path = os.path.join(bucky_folder, f"{filename}-prune.txt")
+        output_file = os.path.join(bucky_folder, filename)
+        prune_file = open(prune_file_path, 'w')
+        prune_file.write(prune_tree_output)
+        prune_file.close()
+    return
+
+
+@parsl.bash_app(executors=['single_partition'])
+def bucky(basedir: dict,
+          config: BioConfig,
+          prune_file: str,
+          inputs=[],
+          outputs=[],
+          stderr=parsl.AUTO_LOGNAME,
+          stdout=parsl.AUTO_LOGNAME,
+          seed = None):
+    """Runs bucky's executable using as input a certain prune tree file
+
+    Parameters:
+        basedir: current working directory
+        prune_file:  prune tree file
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, glob, re, logging
+    work_dir = basedir['dir']
+    logging.info(f'BUCKy called with {work_dir}')
+    mbsum_folder = os.path.join(work_dir, config.mbsum_dir)
+    bucky_folder = os.path.join(work_dir, config.bucky_dir)
+    files = glob.glob(os.path.join(mbsum_folder, '*.sum'))
+    output_file = os.path.basename(prune_file)
+    output_file = re.sub("-prune.txt", "", output_file)
+    output_file = os.path.join(bucky_folder, output_file)
+
+    params = f"-a 1 -n 1000000 -cf 0 -o {output_file} -p {prune_file} {(' ').join(files)}"
+    if seed is not None:
+        params+= f" -s1 {seed} -s2 {seed}"
+    return f"{config.bucky} {params}"
+
+
+@parsl.python_app(executors=['single_partition'])
+def setup_bucky_output(basedir: dict,
+                       config: BioConfig,
+                       inputs=[],
+                       outputs=[],
+                       stderr=parsl.AUTO_LOGNAME,
+                       stdout=parsl.AUTO_LOGNAME):
+    """Create the Concordance Factor table using bucky's outputs
+
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import re, os, glob, logging
+    work_dir = basedir['dir']
+    logging.info(f'Setting up BUCky output in {work_dir}')
+    bucky_folder = os.path.join(work_dir, config.bucky_dir)
+    pattern = re.compile(r"Read \d+ genes with a ")
+    out_files = glob.glob(os.path.join(bucky_folder, "*.out"))
+    table_string = "taxon1,taxon2,taxon3,taxon4,CF12.34,CF12.34_lo,CF12.34_hi,CF13.24,CF13.24_lo,CF13.24_hi,CF14.23,CF14.23_lo,CF14.23_hi,ngenes\n"
+    cf_95_pattern = re.compile(r"(95% CI for CF = \(\w+,\w+\))")
+    mean_num_loci_pattern = re.compile(r"(=\s+\d+\.\d+\s+\(number of loci\))")
+    translate_block_pattern = re.compile(r"translate\n(\s*\w+\s*\w+(,|;)\n*)+")
+    # open all the bucky's output files and parse them
+    for out_file in out_files:
+        taxa = []
+        splits = {}
+        f = open(out_file, 'r')
+        lines = f.read()
+        f.close()
+        num_genes = re.search(pattern, lines).group(0)
+        num_genes = re.search(r"\d+", num_genes).group(0)
+        name_wo_extension = re.sub(".out|", "", os.path.basename(out_file))
+        concordance_file = os.path.join(os.path.dirname(
+            out_file), f"{name_wo_extension}.concordance")
+        f = open(concordance_file, 'r')
+        lines = f.read()
+        f.close()
+        translate_block = re.search(translate_block_pattern, lines).group(0)
+        translate_block = re.sub(r"(,|;|translate\n)", "", translate_block)
+        taxon_list = translate_block.split('\n')
+        for taxon in taxon_list:
+            if(taxon == ""):
+                break
+            t = taxon.split(" ")
+            taxa.append(t[2])
+        all_splits_block = lines.split("All Splits:\n")[1]
+        split = re.findall("{\w+,\w+\|\w+,\w+}", all_splits_block)
+        cf = re.findall(mean_num_loci_pattern, all_splits_block)
+        cf_95 = re.findall(cf_95_pattern, all_splits_block)
+        for i in range(0, len(split)):
+            split[i] = re.sub("({|,|})", "", split[i])
+            split_dict = {}
+            cf[i] = re.sub(r"(=|\(number of loci\)|\s+)", "", cf[i])
+            cf_95[i] = re.sub(r"(95% CI for CF = \(|\))", "", cf_95[i])
+            cf_95_list = cf_95[i].split(',')
+            split_dict['CF'] = float(cf[i])/float(num_genes)
+            split_dict['95_CI_LO'] = float(cf_95_list[0])/float(num_genes)
+            split_dict['95_CI_HI'] = float(cf_95_list[1])/float(num_genes)
+            splits[split[i]] = split_dict
+        parsed_line = (',').join(taxa)
+        parsed_line += ','
+        if "12|34" in splits:
+            parsed_line += f"{splits['12|34']['CF']},{splits['12|34']['95_CI_LO']},{splits['12|34']['95_CI_HI']},"
+        else:
+            parsed_line += "0,0,0,"
+        if "13|24" in splits:
+            parsed_line += f"{splits['13|24']['CF']},{splits['13|24']['95_CI_LO']},{splits['13|24']['95_CI_HI']},"
+
+        else:
+            parsed_line += "0,0,0,"
+        if "14|23" in splits:
+            parsed_line += f"{splits['14|23']['CF']},{splits['14|23']['95_CI_LO']},{splits['14|23']['95_CI_HI']}"
+        else:
+            parsed_line += "0,0,0"
+        parsed_line += f",{num_genes}\n"
+        table_string += parsed_line
+    # create the table folder
+    table_name = os.path.basename(work_dir)
+    table_name = os.path.join(bucky_folder, f"{table_name}.csv")
+    table_file = open(table_name, 'w')
+    table_file.write(table_string)
+    table_file.close()
+    return
+
+
+@parsl.python_app(executors=['single_partition'])
+def setup_qmc_data(basedir: dict,
+                   config: BioConfig,
+                   inputs=[],
+                   outputs=[],
+                   stderr=parsl.AUTO_LOGNAME,
+                   stdout=parsl.AUTO_LOGNAME):
+    """Prepares the Quartet MaxCut input
+
+    Parameters:
+        basedir: current working directory    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import pandas as pd
+    import json, os, logging
+    from pathlib import Path
+    work_dir = basedir['dir']
+    logging.info(f'Setting up Quartet MaxCut data in {work_dir}')
+    dir_name = os.path.basename(work_dir)
+    bucky_folder = os.path.join(work_dir, config.bucky_dir)
+    table_filename = os.path.join(bucky_folder, f'{dir_name}.csv')
+    try:
+        table = pd.read_csv(table_filename, delimiter=',', dtype='string')
+    except Exception:
+        print("Failed to open CF table")
+    table = pd.read_csv(table_filename, delimiter=',', dtype='string')
+    # parse the table
+    quartets = []
+    taxa = {}
+    for index, row in table.iterrows():
+        for i in range(1, 5):
+            if row['taxon' + str(i)] in taxa:
+                taxa[row['taxon' + str(i)]] += 1
+            else:
+                taxa[row['taxon' + str(i)]] = 1
+        cf = {'CF12.34': float(row['CF12.34']), 'CF13.24': float(
+            row['CF13.24']), 'CF14.23': float(row['CF14.23'])}
+        cf_sorted = [k for k in sorted(cf, key=cf.get, reverse=True)]
+        cf_1 = row[cf_sorted[0]]
+        cf_2 = row[cf_sorted[1]]
+        cf_3 = row[cf_sorted[2]]
+        split_1 = f"{row['taxon' + cf_sorted[0][2]]},{row['taxon' + cf_sorted[0][3]]}|{row['taxon' + cf_sorted[0][5]]},{row['taxon' + cf_sorted[0][6]]}"
+        split_2 = f"{row['taxon' + cf_sorted[1][2]]},{row['taxon' + cf_sorted[1][3]]}|{row['taxon' + cf_sorted[1][5]]},{row['taxon' + cf_sorted[1][6]]}"
+        split_3 = f"{row['taxon' + cf_sorted[2][2]]},{row['taxon' + cf_sorted[2][3]]}|{row['taxon' + cf_sorted[2][5]]},{row['taxon' + cf_sorted[2][6]]}"
+        if(cf_1 == cf_2 == cf_3):
+            quartets.extend([split_1, split_2, split_3])
+        elif (cf_1 == cf_2):
+            quartets.extend([split_1, split_2])
+        else:
+            quartets.append(split_1)
+    # change taxon names to ids
+    taxa_id = 1
+    taxon_to_id = {}
+    id_to_taxon = {}
+    dir_name = os.path.basename(work_dir)
+    for k in sorted(taxa):
+        taxon_to_id[str(taxa_id)] = k
+        id_to_taxon[k] = taxa_id
+        taxa_id += 1
+    for i in range(0, len(quartets)):
+        tmp1 = quartets[i].split('|')
+        old_quartets = []
+        old_quartets.extend(tmp1[0].split(','))
+        old_quartets.extend(tmp1[1].split(','))
+        quartets[i] = f"{id_to_taxon[old_quartets[0]]},{id_to_taxon[old_quartets[1]]}|{id_to_taxon[old_quartets[2]]},{id_to_taxon[old_quartets[3]]}"
+    qmc_folder = os.path.join(work_dir, "qmc")
+    qmc_input = os.path.join(qmc_folder, f'{dir_name}.txt')
+    qmc_input_file = open(qmc_input, 'w+')
+    qmc_input_file.write((' ').join(quartets))
+    qmc_input_file.close()
+    # dump ids
+    with open(os.path.join(qmc_folder, f'{dir_name}.json'), "w+") as outfile:
+        json.dump(taxon_to_id, outfile)
+    return
+
+
+@parsl.bash_app(executors=['single_partition'])
+def quartet_maxcut(basedir: dict,
+                   config: BioConfig,
+                   inputs=[],
+                   outputs=[],
+                   stderr=parsl.AUTO_LOGNAME,
+                   stdout=parsl.AUTO_LOGNAME):
+    """Runs quartet maxcut's executable
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, logging
+    work_dir = basedir['dir']
+    logging.info(f'Quartet MaxCut called with {work_dir}')
+    dir_name = os.path.basename(work_dir)
+    qmc_folder = os.path.join(work_dir, "qmc")
+    qmc_input = os.path.join(qmc_folder, f'{dir_name}.txt')
+    qmc_output = os.path.join(qmc_folder, f'{dir_name}.tre')
+    exec_qmc = os.path.join(
+        config.quartet_maxcut_exec_dir, config.quartet_maxcut)
+    return f'{exec_qmc} qrtt={qmc_input} otre={qmc_output}'
+
+
+@parsl.python_app(executors=['single_partition'])
+def setup_qmc_output(basedir: dict,
+                     config: BioConfig,
+                     inputs=[],
+                     outputs=[],
+                     stderr=parsl.AUTO_LOGNAME,
+                     stdout=parsl.AUTO_LOGNAME):
+    """Prepare quartet maxcut's output file
+
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, json, logging
+    import pandas as pd
+    work_dir = basedir['dir']
+    logging.info(f'Setting up Quartet MaxCut in {work_dir}')
+    dir_name = os.path.basename(work_dir)
+    qmc_folder = os.path.join(work_dir, config.quartet_maxcut_dir)
+    qmc_output = os.path.join(qmc_folder, f'{dir_name}.tre')
+    taxon_json = os.path.join(qmc_folder, f'{dir_name}.json')
+    with open(taxon_json, 'r') as f:
+        taxon_to_id = json.load(f)
+    tree_file = open(qmc_output, 'r+')
+    lines = tree_file.read()
+    tree_file.close()
+    tree_file = open(qmc_output, 'w')
+    parsed = ""
+    id_search = ""
+    for character in lines:
+        if(not character.isnumeric()):
+            if(id_search == ""):
+                parsed += character
+            else:
+                parsed += str(taxon_to_id[id_search])
+                id_search = ""
+                parsed+= character
+        else:
+            id_search+= character
+    tree_file.write(parsed)
+    tree_file.close()
+    return
+
+
+@parsl.python_app(executors=['single_partition'])
+def setup_phylonet_data(basedir: dict,
+                        config: BioConfig,
+                        hmax: str,
+                        inputs=[],
+                        outputs=[],
+                        stderr=parsl.AUTO_LOGNAME,
+                        stdout=parsl.AUTO_LOGNAME):
+    """Get the raxml/iqtree's output and create a NEXUS file as output for the phylonet in the basedir
+
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, logging, re
+    work_dir = basedir['dir']
+    tree_method = basedir['tree_method']
+    network_method = basedir['network_method']
+    mapping = basedir['mapping']
+    logging.info(f'Setting up Phylonet data in {work_dir}')
+    gene_trees = ""
+    if(tree_method == "RAXML"):
+        gene_trees = os.path.join(os.path.join(work_dir, config.raxml_dir), config.raxml_rooted_output)
+    elif(tree_method == "IQTREE"):
+        gene_trees = os.path.join(os.path.join(work_dir, config.iqtree_dir), config.iqtree_rooted_output)
+    out_dir = os.path.join(work_dir, config.phylonet_dir)
+    out_filepath = os.path.join(out_dir, (tree_method + '_' + hmax +'_' + config.phylonet_input))
+    try:
+        in_file = open(gene_trees, 'r')
+    except IOError:
+        print("Error! Could not open Gene tree file.")
+        return 
+    try:
+        out_file = open(out_filepath, 'w+')
+    except IOError:
+        print("Error! Could not open output file.")
+        return
+    tree_index = 0
+    buffer = "#NEXUS\nBEGIN TREES;\n"
+    for tree in in_file.readlines():
+        tree_index+=1
+        buffer+="Tree geneTree" + str(tree_index) + " = " + tree
+    in_file.close()
+    buffer+='END;\nBEGIN PHYLONET;\nInferNetwork_MP ('
+    for i in range(0, tree_index-1):
+        buffer+="geneTree" + str(i+1) +','
+    filename = f"{os.path.basename(work_dir)}_{tree_method}_{network_method}_{hmax}.nex"
+    output_network = os.path.join(out_dir,filename)
+    if(len(mapping) == 0):
+        buffer+="geneTree" + str(tree_index) +') ' + hmax + " -pl " + config.phylonet_threads + " -x " + config.phylonet_runs + " " + output_network + ';\nEND;'
+    else:
+        mapping = re.sub(" ", "_", mapping)
+        buffer+="geneTree" + str(tree_index) +') ' + hmax + " -pl " + config.phylonet_threads + " -a <" + mapping +"> -x " + config.phylonet_runs + " " + output_network + ';\nEND;'
+
+    #---
+    out_file.write(buffer)
+    out_file.close()
+    return
+
+
+@parsl.bash_app(executors=['single_partition'])
+def phylonet(basedir: dict,
+            config: BioConfig,
+            input_file: str,
+            inputs=[],
+            outputs=[],
+            next_pipe: Any = None,
+            stderr=parsl.AUTO_LOGNAME,
+            stdout=parsl.AUTO_LOGNAME):
+    """Runs PhyloNet using as input the phylonet_input variable
+
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    work_dir = basedir['dir']
+    tree_method = basedir['tree_method']
+    exec_phylonet = config.phylonet
+    import os, logging
+    logging.info(f'PhyloNet with {work_dir}')
+    output_dir = os.path.join(work_dir, config.phylonet_dir)
+    # Return to Parsl to be executed on the workflow
+    return f'cd {output_dir};{exec_phylonet} {input_file}'
+
+@app_reuse(cache=Cache(), args_to_ignore=["basedir", "config", "stderr", "stdout", "next_pipe"])
+@parsl.bash_app(executors=['single_partition'])
+def iqtree(basedir: dict,
+            config: BioConfig,
+            input_file: str,
+            inputs=[],
+            next_pipe: Any = None,
+            stderr=parsl.AUTO_LOGNAME,
+            stdout=parsl.AUTO_LOGNAME,
+            seed= None):
+    """Runs IQ-TREE's executable using as input a sequence alignment in phylip format
+
+    Parameters:
+        basedir: current working directory
+    Returns:
+        returns an parsl's AppFuture
+
+    TODO: Provide provenance.
+
+    NB:
+        Stdout and Stderr are defaulted to parsl.AUTO_LOGNAME, so the log will be automatically 
+        named according to task id and saved under task_logs in the run directory.
+    """
+    import os, logging
+    work_dir = basedir['dir']
+    outgroup = basedir['outgroup']
+    logging.info(f'IQ-TREE with {work_dir}')
+    iqtree_dir = os.path.join(work_dir, config.iqtree_dir)
+    if ((config.iqtree_model).upper() == "AUTO"):
+        flags = f"-T AUTO -ntmax {config.iqtree_threads} -B {config.bootstrap} --boot-trees -m TEST -s {input_file} --keep-ident -redo"
+    else:
+        flags = f"-T AUTO -ntmax {config.iqtree_threads} -B {config.bootstrap} --boot-trees -m {config.iqtree_model}  -s {input_file} --keep-ident -redo"
+    # Return to Parsl to be executed on the workflow
+    return f"cd {iqtree_dir}; {config.iqtree} {flags}"
+
+
+@parsl.python_app(executors=['single_partition'])
+def create_folders(basedir: dict,
+                   config: BioConfig,
+                   folders=[],
+                   inputs=[],
+                   outputs=[],
+                   stderr=parsl.AUTO_LOGNAME,
+                   stdout=parsl.AUTO_LOGNAME):
+    import os, shutil, logging
+    from appsexception import FolderCreationError ,FolderDeletionError
+    from pathlib import Path
+    work_dir = basedir['dir']
+    logging.info(f'Removing folders from old executions')
+    for folder in folders:
+        full_path = os.path.join(work_dir, folder)
+        if(os.path.exists(full_path)):
+            try:
+                shutil.rmtree(full_path, ignore_errors=True)
+            except Exception:
+                raise FolderDeletionError(full_path)
+    logging.info(f'Creating folders in {work_dir}')
+    for folder in folders:
+        full_path = os.path.join(work_dir, folder)
+        try:
+            Path(full_path).mkdir(exist_ok=True)
+        except Exception:
+            FolderCreationError(full_path)
+    return
+
+@parsl.bash_app(executors=['single_partition'])
+def plot_networks(config: BioConfig,
+                    inputs=[],
+                    outputs=[],
+                    stderr=parsl.AUTO_LOGNAME,
+                    stdout=parsl.AUTO_LOGNAME):
+    import os, logging
+    logging.info("Plotting networks")
+    networks = ""
+    for basedir in config.workload:
+        if basedir['network_method'] == "MPL":
+            snaq_dir = os.path.join(basedir['dir'], config.snaq_dir)
+            for h in config.snaq_hmax:
+                name = f'{os.path.basename(basedir["dir"])}_{basedir["tree_method"]}_MPL_{h}.out'
+                if len(networks) > 0:
+                    networks+=','
+                networks+=os.path.join(snaq_dir, name)
+        if basedir['network_method'] == "MP":
+            phylonet_dir = os.path.join(basedir['dir'], config.phylonet_dir)
+            for h in config.snaq_hmax:
+                name = f'{os.path.basename(basedir["dir"])}_{basedir["tree_method"]}_MP_{h}.nex'
+                if len(networks) > 0:
+                    networks+=','
+                networks+=os.path.join(phylonet_dir, name)
+    return f'julia {config.plot_script} \'{networks}\''
+
+
+======================================================================
+FILE: appsexception.py
+======================================================================
+
+# -*- coding: utf-8 -*-
+
+""" Appsexception.py. Parsl Application Functions (@) 2021
+
+This module encapsulates all Parsl configuration stuff in order to provide a
+cluster configuration based in number of nodes and cores per node.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+
+from parsl import bash_app, python_app
+import parsl
+
+# COPYRIGHT SECTION
+__author__ = "Diego Carvalho"
+__copyright__ = "Copyright 2021, The Biocomp Informal Collaboration (CEFET/RJ and LNCC)"
+__credits__ = ["Diego Carvalho", "Carla Osthoff", "Kary Ocaña", "Rafael Terra"]
+__license__ = "GPL"
+__version__ = "1.0.1"
+__maintainer__ = "Rafael Terra"
+__email__ = "rafaelst@posgrad.lncc.br"
+__status__ = "Research"
+
+
+#
+# Parsl Bash and Python Applications Exceptions
+#
+
+class AlignmentConversion(Exception):
+    """Exception raised for errors in the setup_phylip_data Parsl's bash application.
+
+    Attributes:
+        input_dir -- where setup_phylip_data searchs for a tar file
+        message -- explanation of the error
+    """
+
+    def __init__(self, basedir, message="Unable to convert the alignments."):
+        self.basedir = basedir
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f'{self.basedir} -> {self.message}'
+
+class MrBayesMissingData(Exception):
+
+    def __init__(self, basedir, message="Unable to find the nexus data"):
+        self.message = message
+        self.basedir = basedir
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f'{self.basedir} -> {self.message}'
+
+class TarMissingData(Exception):
+    def __init__(self, basedir, message="Unable to find a tar file with the nexus data."):
+        self.basedir = basedir
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f'{self.basedir} -> {self.message}'
+
+class JsonMissingData(Exception):
+    def __init__(self, basedir, message="Unable to find the JSON file with root and species mapping"):
+        self.basedir = basedir
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f'{self.basedir} -> {self.message}'
+
+class FolderDeletionError(Exception):
+    def __init__(self, basedir, message="Unable to delete folder"):
+        self.basedir = basedir
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f'{self.basedir} -> {self.message}'
+
+class FolderCreationError(Exception):
+    def __init__(self, basedir, message="Unable to create folder"):
+        self.basedir = basedir
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f'{self.basedir} -> {self.message}'
+
+class FileCreationError(Exception):
+    def __init__(self, basedir, message="Unable to create file"):
+        self.basedir = basedir
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f'{self.basedir} -> {self.message}'
+
+class RootMissing(Exception):
+    def __init__(self, basedir, message="Missing the taxon used as outgroup to root the trees"):
+        self.basedir = basedir
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f'{self.basedir} -> {self.message}'
+
+======================================================================
+FILE: bioconfig.py
+======================================================================
+
+# -*- coding: utf-8 -*-
+
+""" BioConfig.py. Biocomp Application Configuration (@) 2021
+
+This module encapsulates all Parsl configuration stuff in order to provide a
+cluster configuration based in number of nodes and cores per node.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+
+#from apps import quartet_maxcut
+from genericpath import isfile
+from parsl import bash_app, python_app
+import parsl, os, json, glob
+from appsexception import JsonMissingData, RootMissing, TarMissingData
+
+# COPYRIGHT SECTION
+__author__ = "Diego Carvalho"
+__copyright__ = "Copyright 2021, The Biocomp Informal Collaboration (CEFET/RJ and LNCC)"
+__credits__ = ["Diego Carvalho", "Carla Osthoff", "Kary Ocaña", "Rafael Terra"]
+__license__ = "GPL"
+__version__ = "1.0.2"
+__maintainer__ = "Rafael Terra"
+__email__ = "rafaelst@posgrad.lncc.br"
+__status__ = "Research"
+
+
+#
+# Parsl Bash and Python Applications Configuration
+#
+from dataclasses import dataclass, field
+
+# TODO: self.mbblock = Prepare to read from a setup file.
+
+class borg(object):
+    def __init__(self, my_class):
+        self.my_class = my_class
+        self.my_instance = None
+
+    def __call__(self, *args, **kwargs):
+        if self.my_instance == None:
+            self.my_instance = self.my_class(*args, **kwargs)
+        return self.my_instance
+
+
+@dataclass()
+class BioConfig:
+    env_path:           str
+    environ:            str
+    script_dir:         str
+    execution_provider: str
+    plot_networks:      bool
+    network_method:     str
+    tree_method:        str
+    bootstrap:          str
+    workload:           field(default_factory=list)
+    workflow_name:      str
+    workflow_path:      str
+    workflow_monitor:   bool
+    workflow_walltime:  str
+    workflow_core:    int
+    workflow_node:    int
+    raxml:              str
+    raxml_dir:          str
+    raxml_output:       str
+    raxml_rooted_output: str
+    raxml_threads:      int
+    raxml_model:        str
+    iqtree:             str
+    iqtree_dir:         str
+    iqtree_model:       str
+    iqtree_threads:     int
+    iqtree_output:      str
+    iqtree_rooted_output: str
+    astral_exec_dir:    str
+    astral_jar:         str
+    astral:             str
+    astral_dir:         str
+    astral_output:      str
+    snaq:               str
+    snaq_threads:       int
+    snaq_hmax:          field(default_factory=list)
+    snaq_runs:          int
+    snaq_dir:           str
+    mrbayes:            str
+    mrbayes_parameters: str
+    mrbayes_dir:        str
+    bucky:              str
+    bucky_dir:          str
+    mbsum:              str
+    mbsum_dir:          str
+    quartet_maxcut:     str
+    quartet_maxcut_exec_dir: str
+    quartet_maxcut_dir: str
+    phylonet:           str
+    phylonet_exec_dir:  str
+    phylonet_jar:       str
+    phylonet_threads:   str
+    phylonet_hmax:      field(default_factory=list)
+    phylonet_input:     str
+    phylonet_dir:       str
+    phylonet_runs:      str
+    plot_script:        str
+
+    def __hash__(self):
+        workload_tuples = [tuple(item.items()) for item in self.workload]
+        return hash((
+            self.env_path,
+            self.environ,
+            self.script_dir,
+            self.execution_provider,
+            self.plot_networks,
+            self.network_method,
+            self.tree_method,
+            self.bootstrap,
+            tuple(workload_tuples),
+            self.workflow_name,
+            self.workflow_path,
+            self.workflow_monitor,
+            self.workflow_walltime,
+            self.workflow_core,
+            self.workflow_node,
+            self.raxml,
+            self.raxml_dir,
+            self.raxml_output,
+            self.raxml_rooted_output,
+            self.raxml_threads,
+            self.raxml_model,
+            self.iqtree,
+            self.iqtree_dir,
+            self.iqtree_model,
+            self.iqtree_threads,
+            self.iqtree_output,
+            self.iqtree_rooted_output,
+            self.astral_exec_dir,
+            self.astral_jar,
+            self.astral,
+            self.astral_dir,
+            self.astral_output,
+            self.snaq,
+            self.snaq_threads,
+            tuple(self.snaq_hmax),
+            self.snaq_runs,
+            self.snaq_dir,
+            self.mrbayes,
+            self.mrbayes_parameters,
+            self.mrbayes_dir,
+            self.bucky,
+            self.bucky_dir,
+            self.mbsum,
+            self.mbsum_dir,
+            self.quartet_maxcut,
+            self.quartet_maxcut_exec_dir,
+            self.quartet_maxcut_dir,
+            self.phylonet,
+            self.phylonet_exec_dir,
+            self.phylonet_jar,
+            self.phylonet_threads,
+            tuple(self.phylonet_hmax),
+            self.phylonet_input,
+            self.phylonet_dir,
+            self.phylonet_runs,
+            self.plot_script,
+        ))
+
+
+@borg
+class ConfigFactory:
+    def __init__(self, config_file: str = "default.ini", custom_workload: str = None) -> None:
+        import configparser
+        self.custom_workload = custom_workload
+        self.config_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), os.path.join('config', config_file))
+        self.config = configparser.ConfigParser()
+        self.config.read(self.config_file)
+        return
+    def build_config(self) -> BioConfig:
+
+        cf = self.config
+        workflow_path = os.path.dirname(os.path.realpath(__file__))
+        script_dir = os.path.join(workflow_path, 'scripts')
+        env_path = os.path.join(workflow_path, os.path.join('config', cf['GENERAL']['Environ']))
+        environ = ""  # empty
+        with open(f"{env_path}", "r") as f:
+            environ = f.read()
+            environ+=f'\nexport PYTHONPATH=$PYTHONPATH:{workflow_path}'
+        #Choose which method is going to be used to construct the network (Phylonet, SNAQ and others)
+        network_method = cf['GENERAL']['NetworkMethod']
+        tree_method = cf['GENERAL']['TreeMethod']
+        # Read where datasets are...
+        if self.custom_workload is not None:
+            workload_path = os.path.join(workflow_path, os.path.join('config', self.custom_workload))
+        else:
+            workload_path = os.path.join(workflow_path, os.path.join('config', cf['GENERAL']['Workload']))
+        workload = list()
+        with open(f"{workload_path}", "r") as f:
+            for line in f:
+                dir_ = {}
+                line = line.strip()
+                if len(line) > 0 and line[0] != '#':
+                    line_with_method = line.split('@')
+                    dir_['dir'] = line_with_method[0].strip()
+                    #check if the line contains a specific method
+                    if(len(line_with_method) > 1):
+                        methods = line_with_method[1].strip().split('|')
+                        if(len(methods) > 0):
+                            dir_['tree_method']=methods[0]
+                            if(len(methods) > 1):
+                                dir_['network_method'] = methods[1]
+                            else:
+                                dir_['network_method'] = network_method
+                        else:
+                            dir_['tree_method'] = tree_method
+                            dir_['network_method'] = network_method
+                    else:
+                        dir_['tree_method'] = tree_method
+                        dir_['network_method'] = network_method
+                    #read the json
+                    input_dir = os.path.join(dir_['dir'], 'input')
+                    if os.path.isdir(input_dir) == False:
+                        input_dir = os.path.join(dir_['dir'], 'Input')
+                    json_file = glob.glob(os.path.join(input_dir, '*.json'))
+                    if len(json_file) > 0:
+                        with open(json_file[0], 'r') as jf:
+                            json_data = json.load(jf)
+                            dir_['mapping'] = json_data['Mapping']
+                            dir_['outgroup'] = json_data['Outgroup']
+                            if dir_['outgroup'] == "":
+                                raise RootMissing(dir_['dir'])
+                    else:
+                        raise JsonMissingData(dir_['dir'])
+                    #check for the sequence alignments
+                    tar_file = glob.glob(os.path.join(input_dir, '*.tar.gz'))
+                    if len(tar_file) > 0:
+                        dir_['sequences'] = tar_file[0]
+                    else:
+                        raise TarMissingData(dir_['dir'])
+                    workload.append(dir_)
+        bootstrap = cf['GENERAL']['BootStrap']
+        execution_provider = cf['GENERAL']['ExecutionProvider'].upper()
+        plot_networks = cf["WORKFLOW"].getboolean("Plot")
+
+        #SYSTEM
+        #WORKFLOW
+        workflow_name = "HP2NET"
+        workflow_monitor = cf["WORKFLOW"].getboolean("Monitor")
+        if execution_provider == "SLURM":
+            workflow_walltime = cf["WORKFLOW"]["Walltime"]
+            workflow_core = int(cf["WORKFLOW"]["PartCore"]) #hardcoded to ensure a free core to parsl 
+            workflow_node = int(cf["WORKFLOW"]["PartNode"])
+        else:
+            workflow_walltime = None
+            workflow_core = int(cf["WORKFLOW"]["MaxCore"]) #hardcoded to ensure a free core to parsl 
+            workflow_node = int(cf["WORKFLOW"]["CoresPerWorker"])
+        #RAXML
+        raxml = cf['RAXML']['RaxmlExecutable']
+        raxml_dir = 'raxml'
+        raxml_output = 'besttrees.tre'
+        raxml_rooted_output = 'besttrees_rooted.tre'
+        raxml_threads = cf['RAXML']['RaxmlThreads']
+        raxml_model = cf['RAXML']['RaxmlEvolutionaryModel']
+        #IQTREE
+        iqtree = cf['IQTREE']['IqTreeExecutable']
+        iqtree_dir = 'iqtree'
+        iqtree_model = cf['IQTREE']['IqTreeEvolutionaryModel']
+        iqtree_threads = cf['IQTREE']['IqTreeThreads']
+        iqtree_output = 'besttrees.tre'
+        iqtree_rooted_output = 'besttrees_rooted.tre'
+        #ASTRAL
+        astral_exec_dir = cf['ASTRAL']['AstralExecDir']
+        astral_jar = cf['ASTRAL']['AstralJar']
+        astral = f"java -jar {os.path.join(astral_exec_dir, astral_jar)}"
+        astral_dir = 'astral'
+        astral_output = 'astral.tre'
+        #SNAQ
+        snaq = 'snaq.jl'
+        snaq_threads = int(cf['SNAQ']['SnaqThreads'])
+        snaq_hmax_raw = cf['SNAQ']['SnaqHMax']
+        snaq_hmax = list()
+        for h in snaq_hmax_raw.split(','):
+            snaq_hmax.append(h.strip())
+        snaq_runs = int(cf['SNAQ']['SnaqRuns'])
+        snaq_dir = 'snaq'
+        
+        #PHYLONET
+        phylonet_exec_dir = cf['PHYLONET']['PhyloNetExecDir']
+        phylonet_jar = cf['PHYLONET']['PhyloNetJar']
+        phylonet = f"java -jar {os.path.join(phylonet_exec_dir, phylonet_jar)}"
+        phylonet_threads = cf['PHYLONET']['PhyloNetThreads']
+        phylonet_runs = cf['PHYLONET']['PhyloNetRuns']
+        phylonet_hmax_raw = cf['PHYLONET']['PhyloNetHMax']
+        phylonet_hmax = list()
+        for h in phylonet_hmax_raw.split(','):
+            phylonet_hmax.append(h.strip())
+        phylonet_input = 'phylonet_phase_1.nex'
+        phylonet_dir = 'phylonet'
+        #MRBAYES
+        mrbayes = cf['MRBAYES']['MBExecutable']
+        mrbayes_parameters = cf['MRBAYES']['MBParameters']
+        mrbayes_dir = 'mrbayes'
+        #BUCKY
+        bucky = cf['BUCKY']['BuckyExecutable']
+        bucky_dir= 'bucky'
+        #MBSUM
+        mbsum = cf['BUCKY']['MbSumExecutable']
+        mbsum_dir = 'mbsum'
+        #QUARTET MAXCUT
+        quartet_maxcut = cf['QUARTETMAXCUT']['QmcExecutable']
+        quartet_maxcut_exec_dir = cf['QUARTETMAXCUT']['QmcExecDir']
+        quartet_maxcut_dir = 'qmc'
+        #PLOT SCRIPT
+        plot_script = os.path.join(script_dir, "plot.jl")
+        self.bioconfig = BioConfig(script_dir=script_dir,
+                                   execution_provider=execution_provider,
+                                   plot_networks=plot_networks,
+                                   network_method=network_method,
+                                   tree_method=tree_method,
+                                   bootstrap=bootstrap,
+                                   workload=workload,
+                                   env_path=env_path,
+                                   environ=environ,
+                                   workflow_monitor=workflow_monitor,
+                                   workflow_name=workflow_name,
+                                   workflow_path=workflow_path,
+                                   workflow_walltime=workflow_walltime,
+                                   workflow_core=workflow_core,
+                                   workflow_node=workflow_node,
+                                   raxml=raxml,
+                                   raxml_dir=raxml_dir,
+                                   raxml_output=raxml_output,
+                                   raxml_rooted_output=raxml_rooted_output,
+                                   raxml_threads=raxml_threads,
+                                   raxml_model=raxml_model,
+                                   iqtree=iqtree,
+                                   iqtree_dir=iqtree_dir,
+                                   iqtree_model=iqtree_model,
+                                   iqtree_threads=iqtree_threads,
+                                   iqtree_output=iqtree_output,
+                                   iqtree_rooted_output=iqtree_rooted_output,
+                                   astral_exec_dir=astral_exec_dir,
+                                   astral_jar=astral_jar,
+                                   astral=astral,
+                                   astral_dir=astral_dir,
+                                   astral_output=astral_output,
+                                   snaq=snaq,
+                                   snaq_threads=snaq_threads,
+                                   snaq_hmax=snaq_hmax,
+                                   snaq_runs=snaq_runs,
+                                   snaq_dir=snaq_dir,
+                                   mrbayes=mrbayes,
+                                   mrbayes_parameters=mrbayes_parameters,
+                                   mrbayes_dir=mrbayes_dir,
+                                   bucky=bucky,
+                                   bucky_dir=bucky_dir,
+                                   mbsum=mbsum,
+                                   mbsum_dir=mbsum_dir,
+                                   quartet_maxcut=quartet_maxcut,
+                                   quartet_maxcut_exec_dir=quartet_maxcut_exec_dir,
+                                   quartet_maxcut_dir=quartet_maxcut_dir,
+                                   phylonet=phylonet,
+                                   phylonet_exec_dir=phylonet_exec_dir,
+                                   phylonet_jar=phylonet_jar,
+                                   phylonet_threads=phylonet_threads,
+                                   phylonet_hmax=phylonet_hmax,
+                                   phylonet_input=phylonet_input,
+                                   phylonet_dir=phylonet_dir,
+                                   phylonet_runs=phylonet_runs,
+                                   plot_script=plot_script
+                                   )
+        return self.bioconfig
+
+
+======================================================================
+FILE: config/default.ini
+======================================================================
+
+[GENERAL]
+ExecutionProvider = LocalProvider
+NetworkMethod   = MP
+TreeMethod      = RAXML
+BootStrap       = 1000
+Environ			= parsl.env
+Workload		= work.config
+Plot			= False
+[WORKFLOW]
+Monitor			= False
+MaxCore	= 4
+CoresPerWorker	= 1
+
+[RAXML]
+RaxmlExecutable = raxmlHPC-PTHREADS-SSE3
+RaxmlThreads 	= 1
+RaxmlEvolutionaryModel = GTRGAMMA --HKY85
+
+[IQTREE]
+IqTreeExecutable = iqtree2
+IqTreeEvolutionaryModel = TIM2+I+G 
+IqTreeThreads    = 1
+
+[ASTRAL]
+AstralExecDir 	= /usr/local/bin
+AstralJar 		= Astral.jar
+
+[PHYLONET]
+PhyloNetExecDir 	= /usr/local/bin
+PhyloNetJar 		= PhyloNet.jar
+PhyloNetThreads     = 4
+PhyloNetHMax        = 3
+PhyloNetRuns        = 10
+
+[SNAQ]
+SnaqThreads		= 4
+SnaqHMax        = 3
+SnaqRuns        = 10
+
+[MRBAYES]
+MBExecutable	= mb
+MBParameters	= set usebeagle=no beagledevice=cpu beagleprecision=double; mcmcp ngen=1000000 burninfrac=.25 samplefreq=50 printfreq=10000 diagnfreq=10000 nruns=2 nchains=2 temp=0.40 swapfreq=10
+
+[BUCKY]
+BuckyExecutable = bucky
+MbSumExecutable = mbsum
+
+[QUARTETMAXCUT]
+QmcExecDir       = /usr/local/bin
+QmcExecutable    = find-cut-Linux-64
+
+
+======================================================================
+FILE: config/parsl.env
+======================================================================
+
+export PATH="/opt/julia-1.9.3/bin:$PATH"
+
+
+======================================================================
+FILE: config/parsl_slurm.env
+======================================================================
+
+module load R/4.1.0_gnu
+module unload python/2.7
+module load python/3.8.2
+module load raxml/8.2_openmpi-2.0_gnu
+module load java/jdk-12
+module load iqtree/2.1.1
+module load bucky/1.4.4
+module load mrbayes/3.2.7a-OpenMPI-4.0.4
+source /scratch/app/modulos/julia-1.5.1.sh
+
+
+======================================================================
+FILE: config/slurm.ini
+======================================================================
+
+[GENERAL]
+ExecutionProvider = SLURM
+NetworkMethod   = MP
+TreeMethod      = RAXML
+BootStrap       = 1000
+Environ			= parsl.env
+Workload		= work.config
+Plot			= False
+[WORKFLOW]
+Monitor			= False
+PartCore	= 24
+PartNode	= 1
+Walltime	= 00:20:00
+
+[RAXML]
+RaxmlExecutable = raxmlHPC-PTHREADS-AVX
+RaxmlThreads 	= 6
+RaxmlEvolutionaryModel = GTRGAMMA --HKY85
+
+[IQTREE]
+IqTreeExecutable = /scratch/pcmrnbio2/rafael.terra/iqtree-2.2.0-Linux/bin/iqtree2
+IqTreeEvolutionaryModel = TIM2+I+G 
+IqTreeThreads    = 1
+
+[ASTRAL]
+AstralExecDir 	= /scratch/pcmrnbio2/app/softwares/astral/5.7.1
+AstralJar 		= astral.5.7.1.jar
+
+[PHYLONET]
+PhyloNetExecDir 	= /scratch/pcmrnbio2/softwares/phylonet/
+PhyloNetJar 		= PhyloNet_3.8.2.jar
+PhyloNetThreads     = 10
+PhyloNetHMax        = 3
+PhyloNetRuns        = 10
+
+[SNAQ]
+SnaqThreads		= 10
+SnaqHMax        = 3
+SnaqRuns        = 10
+
+[MRBAYES]
+MBExecutable	= mb
+MBParameters	= mcmcp ngen=1000000 burninfrac=.25 samplefreq=50 printfreq=10000 diagnfreq=10000 nruns=2 nchains=2 temp=0.40 swapfreq=10
+
+[BUCKY]
+BuckyExecutable = bucky
+MbSumExecutable = mbsum
+
+[QUARTETMAXCUT]
+QmcExecDir       = /scratch/pcmrnbio2/app/softwares/quartet/
+QmcExecutable    = find-cut-Linux-64
+
+
+======================================================================
+FILE: config/work.config
+======================================================================
+
+/volume/Denv_1_outgroup@RAXML|MPL
+
+
+======================================================================
+FILE: default.ini
+======================================================================
+
+[GENERAL]
+ExecutionProvider = LocalProvider
+NetworkMethod   = MP
+TreeMethod      = RAXML
+BootStrap       = 1000
+Environ			= parsl.env
+Workload		= work.config
+Plot			= False
+[WORKFLOW]
+Monitor			= False
+MaxCore	= 4
+CoresPerWorker	= 1
+
+[RAXML]
+RaxmlExecutable = raxmlHPC-PTHREADS-SSE3
+RaxmlThreads 	= 1
+RaxmlEvolutionaryModel = GTRGAMMA --HKY85
+
+[IQTREE]
+IqTreeExecutable = iqtree2
+IqTreeEvolutionaryModel = TIM2+I+G 
+IqTreeThreads    = 1
+
+[ASTRAL]
+AstralExecDir 	= /usr/local/bin
+AstralJar 		= Astral.jar
+
+[PHYLONET]
+PhyloNetExecDir 	= /usr/local/bin
+PhyloNetJar 		= PhyloNet.jar
+PhyloNetThreads     = 4
+PhyloNetHMax        = 3
+PhyloNetRuns        = 10
+
+[SNAQ]
+SnaqThreads		= 4
+SnaqHMax        = 3
+SnaqRuns        = 10
+
+[MRBAYES]
+MBExecutable	= mb
+MBParameters	= set usebeagle=no beagledevice=cpu beagleprecision=double; mcmcp ngen=1000000 burninfrac=.25 samplefreq=50 printfreq=10000 diagnfreq=10000 nruns=2 nchains=2 temp=0.40 swapfreq=10
+
+[BUCKY]
+BuckyExecutable = bucky
+MbSumExecutable = mbsum
+
+[QUARTETMAXCUT]
+QmcExecDir       = /usr/local/bin
+QmcExecutable    = find-cut-Linux-64
+
+
+======================================================================
+FILE: infra_manager.py
+======================================================================
+
+# -*- coding: utf-8 -*-
+
+""" infra_manager.py. Parsl Configuration Functions (@) 2021
+
+This module encapsulates all Parsl configuration stuff in order to provide a
+cluster configuration based in number of nodes and cores per node.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+
+# COPYRIGHT SECTION
+__author__ = "Diego Carvalho"
+__copyright__ = "Copyright 2021, The Biocomp Informal Collaboration (CEFET/RJ and LNCC)"
+__credits__ = ["Diego Carvalho", "Carla Osthoff", "Kary Ocaña", "Rafael Terra"]
+__license__ = "GPL"
+__version__ = "1.0.1"
+__maintainer__ = "Rafael Terra"
+__email__ = "rafaelst@posgrad.lncc.br"
+__status__ = "Research"
+
+
+import parsl
+import logging
+from parsl.launchers import SrunLauncher, SingleNodeLauncher
+from parsl.addresses import address_by_interface, address_by_hostname
+from parsl.executors import HighThroughputExecutor, WorkQueueExecutor
+from parsl.providers import LocalProvider, SlurmProvider
+from datetime import datetime
+from bioconfig import BioConfig
+# PARSL CONFIGURATION
+
+
+def workflow_config(config: BioConfig, **kwargs) -> parsl.config.Config:
+    """ Configures and loads Parsl's Workflow configuration
+
+    Parameters:
+
+    config: BioConfig    - Workflow configuration
+    """
+    logger = logging.getLogger()
+    interval = 30
+    monitor = config.workflow_monitor
+    now = datetime.now()
+    name = config.workflow_name
+    date_time = now.strftime("%d-%m-%Y_%H-%M-%S")
+    #parsl.set_stream_logger(level=logging.INFO, stream=sys.stdout)
+    parsl.set_file_logger(
+        f'{name}_script_{date_time}.output', level=logging.INFO)
+
+    if kwargs.get("max_workers") is not None:
+        curr_workers = kwargs["max_workers"]
+    else:
+        curr_workers = config.workflow_core
+    if kwargs.get("runinfo") is not None:
+        run_dir = kwargs["runinfo"]
+    else:
+        run_dir = "runinfo"
+    logging.info('Configuring Parsl Workflow Infrastructure')
+
+    # Read where datasets are...
+    env_str = config.environ
+
+    logging.info(f'Task Environment {env_str}')
+
+    if config.execution_provider == "SLURM":
+        mon_hub = parsl.monitoring.monitoring.MonitoringHub(
+            workflow_name=name,
+            hub_address=address_by_hostname(),
+            resource_monitoring_enabled=True,
+            monitoring_debug=False,
+            resource_monitoring_interval=interval,
+        ) if monitor else None
+        return parsl.config.Config(
+            retries=2,
+            run_dir=run_dir,
+            executors=[
+                HighThroughputExecutor(
+                    label=f'single_partition',
+                    # Optional: The network interface on node 0 which compute nodes can communicate with.
+                    address=address_by_hostname(),
+                    max_workers_per_node=curr_workers,
+                    cores_per_worker=1,
+                    worker_debug=False,
+                    provider=LocalProvider(
+                        nodes_per_block=1,
+                        parallelism=1,
+                        init_blocks=config.workflow_node,
+                        max_blocks=config.workflow_node,
+                        min_blocks = config.workflow_node,
+                        worker_init=env_str,
+                        launcher=SrunLauncher(
+                            overrides=f'-c {config.workflow_core}')
+                    ),
+                ),
+            ],
+            monitoring=mon_hub,
+            strategy=None,
+        )
+    else:
+        mon_hub = parsl.monitoring.monitoring.MonitoringHub(
+            workflow_name=name,
+            hub_address="127.0.0.1",
+            resource_monitoring_enabled=True,
+            monitoring_debug=False,
+            resource_monitoring_interval=interval,
+        ) if monitor else None
+        return parsl.config.Config(
+            run_dir=run_dir,
+            retries=2,
+            executors=[
+                HighThroughputExecutor(
+                    label=f'single_partition',
+                    # Optional: The network interface on node 0 which compute nodes can communicate with.
+                    address="127.0.0.1",
+                    cores_per_worker=config.workflow_node,
+                    max_workers_per_node=curr_workers,
+                    worker_debug=False,
+                    provider=LocalProvider(
+                        nodes_per_block=1,
+                        parallelism=1,
+                        init_blocks=config.workflow_node,
+                        max_blocks=config.workflow_node,
+                        worker_init=env_str,
+                    ),
+                ),
+            ],
+            monitoring=mon_hub,
+            strategy=None,
+        )
+
+# SYNCHRONIZATION ROUTINES
+
+
+def wait_for_all(list_of_futures: list, sleep_interval=10) -> None:
+    """ Wait for parsl's future completion.
+
+        Loops over the list of futures and check if everone were done.
+        If not, sleep for sleep_interval.
+    Parameters:
+        list_of_futures (list): a list of parsl's futures.
+        sleep_interval (int): sleep interval
+    """
+    # TODO: must find a better algorithm, since there are different
+    # workflows being executed on parallel (several DAGs).
+    # Perhaps, DAG executer should be implemented, where the user
+    # may provide several workflows (DAGs) and the may be enacted by
+    # a scheduler.
+
+    # Fetch status (just inform parsl that we can proceed)
+    for r in list_of_futures:
+        r.result()
+
+    return
+
+
+======================================================================
+FILE: multiple_submissions.py
+======================================================================
+
+import time, os, glob, re, argparse, subprocess
+from datetime import datetime
+TIME_PATTERN = '%Y-%m-%d %H:%M:%S.%f' #parsl.log timestamp pattern
+SLEEP_TIME = 60*30 #sleep for 60 min
+NUMBER_EXEC = 3
+MAX_TASKS = 24
+MIN_TASKS = 1
+def check_runing():
+    try:
+        status = subprocess.check_output("squeue -u rafael.terra | grep \" R \"", shell=True)
+    except Exception:
+        status = ""
+    if(len(status) > 0):
+        return True
+    else:
+        return False
+def check_waiting():
+    try:
+        status = subprocess.check_output("squeue -u rafael.terra | grep \" PD \"", shell=True)
+    except Exception:
+        status = ""
+    if(len(status) > 0):
+        return True
+    else:
+        return False
+
+def multiple_workloads():
+    times = list()
+    #configs = ['300g6t_iqtree_phylonet.config', '300g6t_iqtree_snaq.config', '300g6t_raxml_phylonet.config', '300g6t_raxml_snaq.config', '300g6t_mrbayes_snaq.config', '300g6t_all.config']
+    #configs.extend(['1000g6t_iqtree_phylonet.config', '1000g6t_iqtree_snaq.config', '1000g6t_raxml_phylonet.config', '1000g6t_raxml_snaq.config', '1000g6t_mrbayes_snaq.config', '1000g6t_all.config'])
+    configs = ['100g6t_iqtree_phylonet.config', '100g6t_iqtree_snaq.config', '100g6t_raxml_phylonet.config', '100g6t_raxml_snaq.config', '100g6t_mrbayes_snaq.config', '100g6t_all.config']
+    # configs.extend(['300g6t_iqtree_phylonet.config', '300g6t_iqtree_snaq.config', '300g6t_raxml_phylonet.config', '300g6t_raxml_snaq.config', '300g6t_mrbayes_snaq.config', '300g6t_all.config'])
+    # configs.extend(['1000g6t_iqtree_phylonet.config', '1000g6t_iqtree_snaq.config', '1000g6t_raxml_phylonet.config', '1000g6t_raxml_snaq.config', '1000g6t_mrbayes_snaq.config', '1000g6t_all.config'])
+    print('Workload:')
+    print(format(configs))
+    for i in range(0, NUMBER_EXEC*len(configs)):
+        ind = i % len(configs)
+        print(f'Submitting {configs[ind]}')
+        while(check_runing()):
+            print(f'There is a job running. Sleeping...')
+            time.sleep(SLEEP_TIME)
+        subprocess.call(f'sbatch --export=ALL,SCRATCH=\'{os.environ["SCRATCH"]}\',WF=\'{os.path.join(os.getcwd(), os.path.join("config",configs[ind]))}\' submit.sh', shell=True)
+        while(check_runing() or check_waiting()):
+            print(f'There is a job waiting or running. Sleeping...')
+            time.sleep(SLEEP_TIME)
+        files = sorted(glob.glob(os.path.join(os.getcwd(), 'runinfo/*')))
+        last_runinfo = files[len(files) - 1]
+        log = os.path.join(last_runinfo, 'parsl.log')
+        first_line = ""
+        last_line = ""
+        with open(log, "rb") as file:
+            try:
+                file.seek(0)
+                first_line =  file.readline().decode()
+                file.seek(-2, os.SEEK_END)
+                while file.read(1) != b'\n':
+                    file.seek(-2, os.SEEK_CUR)
+            except OSError:
+                file.seek(0)
+            last_line = file.readline().decode()
+        time_begin = re.match('\d+-\d+-\d+\s\d+:\d+:\d+\.\d+', first_line).group(0)
+        time_end = re.match('\d+-\d+-\d+\s\d+:\d+:\d+\.\d+', last_line).group(0)
+        total_time = datetime.strptime(time_end, TIME_PATTERN) - datetime.strptime(time_begin, TIME_PATTERN)
+        with open("output.txt", 'a') as output:
+            output.write(f'{configs[ind]},{total_time.total_seconds()}\n')
+            output.close()
+
+def multiple_tasks():
+    configs = ['1000g6t_mrbayes_snaq.config']
+    # configs = ['100g6t_iqtree_phylonet.config', '100g6t_iqtree_snaq.config', '100g6t_raxml_phylonet.config', '100g6t_raxml_snaq.config', '100g6t_mrbayes_snaq.config', '100g6t_all.config']
+    for config in configs:
+        for task in [24]:
+        # for task in [1, 4, 8, 16, 24]:
+            for i in range(0, NUMBER_EXEC):
+                print(f"Submitting Workload: {config} Max workers: {task} Execution {i}")
+                while(check_runing()):
+                    print(f'There is a job running. Sleeping...')
+                    time.sleep(SLEEP_TIME)
+                subprocess.call(f'sbatch --export=ALL,SCRATCH=\'{os.environ["SCRATCH"]}\',WF=\'{os.path.join(os.getcwd(), os.path.join("config",config))}\',MW=\'{task}\' submit.sh', shell=True)
+                while(check_runing() or check_waiting()):
+                    print(f'There is a job waiting or running. Sleeping...')
+                    time.sleep(SLEEP_TIME)
+
+        
+
+if __name__ == "__main__":
+    multiple_tasks()
+
+
+======================================================================
+FILE: parsl.env
+======================================================================
+
+export PATH="/app/julia-1.9.3/bin:$PATH"
+
+
+======================================================================
+FILE: parsl_workflow.py
+======================================================================
+
+import parsl
+import apps
+import glob
+import bioconfig
+import os
+import logging
+import argparse
+import math
+from infra_manager import workflow_config, wait_for_all
+from utils import CircularList
+
+reuse = False
+cache = dict()
+# LOGGING SECTION
+logger = logging.getLogger()
+logging.basicConfig(level=logging.CRITICAL)
+
+
+def raxml_snaq(bio_config, basedir, prepare_to_run):
+    max_workers = bio_config.workflow_core*bio_config.workflow_node
+    result = list()
+    ret_tree = list()
+    datalist = list()
+    pool = CircularList(math.floor(
+        max_workers/int(bio_config.raxml_threads)))
+    # append the input files
+    dir_ = os.path.join(os.path.join(basedir['dir'], "input"), "phylip")
+    datalist = glob.glob(os.path.join(dir_, '*.phy'))
+    for i, input_file in enumerate(datalist):
+        ret = apps.raxml(basedir=basedir,
+                         config=bio_config,
+                         inputs=prepare_to_run,
+                         input_file=input_file, next_pipe=pool.next())
+        pool.current(ret)
+        ret_tree.append(ret)
+    ret_sad = apps.setup_tree_output(
+        basedir=basedir, config=bio_config, inputs=ret_tree)
+    logging.info("Using the Maximum Pseudo Likelihood Method")
+    ret_ast = apps.astral(basedir, config=bio_config, inputs=[ret_sad])
+    pool_phylo = CircularList(math.floor(
+        max_workers/int(bio_config.snaq_threads)))
+    for h in bio_config.snaq_hmax:
+        ret_snq = apps.snaq(basedir, config=bio_config, hmax=h, inputs=[
+                            ret_ast], next_pipe=pool_phylo.next())
+        pool_phylo.current(ret_snq)
+        result.append(ret_snq)
+    return result
+
+
+def raxml_phylonet(bio_config, basedir, prepare_to_run):
+    result = list()
+    ret_tree = list()
+    datalist = list()
+    max_workers = bio_config.workflow_core*bio_config.workflow_node
+    pool = CircularList(math.floor(
+        max_workers/int(bio_config.raxml_threads)))
+    # append the input files
+    dir_ = os.path.join(os.path.join(basedir['dir'], "input"), "phylip")
+    datalist = glob.glob(os.path.join(dir_, '*.phy'))
+    for i, input_file in enumerate(datalist):
+        ret = apps.raxml(basedir=basedir,
+                         inputs=prepare_to_run,
+                         config=bio_config,
+                         input_file=input_file, next_pipe=pool.next())
+        pool.current(ret)
+        ret_tree.append(ret)
+    ret_sad = apps.setup_tree_output(
+        basedir=basedir, config=bio_config, inputs=ret_tree)
+    ret_rooted = apps.root_tree(basedir, config=bio_config, inputs=[ret_sad])
+    logging.info("Using the Maximum Parsimony Method")
+    out_dir = os.path.join(basedir['dir'], bio_config.phylonet_dir)
+    pool_phylo = CircularList(math.floor(
+        max_workers/int(bio_config.phylonet_threads)))
+    for h in bio_config.phylonet_hmax:
+        ret_spd = apps.setup_phylonet_data(
+            basedir, config=bio_config, hmax=h, inputs=[ret_rooted])
+        filename = os.path.join(
+            out_dir, (basedir['tree_method'] + '_' + h + '_' + bio_config.phylonet_input))
+        ret_phylonet = apps.phylonet(basedir, config=bio_config, input_file=filename, inputs=[
+                                     ret_spd], next_pipe=pool_phylo.next())
+        pool_phylo.current(ret_phylonet)
+        result.append(ret_phylonet)
+    return result
+
+
+def iqtree_snaq(bio_config, basedir, prepare_to_run):
+    max_workers = bio_config.workflow_core*bio_config.workflow_node
+    result = list()
+    ret_tree = list()
+    datalist = list()
+    pool = CircularList(math.floor(
+        max_workers/int(bio_config.iqtree_threads)))
+    # append the input files
+    dir_ = os.path.join(os.path.join(basedir['dir'], "input"), "phylip")
+    datalist = glob.glob(os.path.join(dir_, '*.phy'))
+    for input_file in datalist:
+        ret = apps.iqtree(basedir=basedir, config=bio_config,
+                          inputs=prepare_to_run,
+                          input_file=input_file, next_pipe=pool.next())
+        pool.current(ret)
+        ret_tree.append(ret)
+    ret_sad = apps.setup_tree_output(
+        basedir=basedir, config=bio_config, inputs=ret_tree)
+    logging.info("Using the Maximum Pseudo Likelihood Method")
+    ret_ast = apps.astral(basedir, bio_config, inputs=[ret_sad])
+    pool_phylo = CircularList(math.floor(
+        max_workers/int(bio_config.snaq_threads)))
+    for h in bio_config.snaq_hmax:
+        ret_snq = apps.snaq(basedir, bio_config, h, inputs=[
+                            ret_ast], next_pipe=pool_phylo.next())
+        pool_phylo.current(ret_snq)
+        result.append(ret_snq)
+    return result
+
+
+def iqtree_phylonet(bio_config, basedir, prepare_to_run):
+    result = list()
+    ret_tree = list()
+    datalist = list()
+    max_workers = bio_config.workflow_core*bio_config.workflow_node
+    pool = CircularList(math.floor(max_workers/int(bio_config.iqtree_threads)))
+    # append the input files
+    dir_ = os.path.join(os.path.join(basedir['dir'], "input"), "phylip")
+    datalist = glob.glob(os.path.join(dir_, '*.phy'))
+    for input_file in datalist:
+        ret = apps.iqtree(basedir=basedir, config=bio_config, inputs=prepare_to_run,
+                          input_file=input_file, next_pipe=pool.next())
+        pool.current(ret)
+        ret_tree.append(ret)
+    ret_sad = apps.setup_tree_output(
+        basedir=basedir, config=bio_config, inputs=ret_tree)
+    ret_rooted = apps.root_tree(basedir, bio_config, inputs=[ret_sad])
+    logging.info("Using the Maximum Parsimony Method")
+    out_dir = os.path.join(basedir['dir'], bio_config.phylonet_dir)
+    pool_phylo = CircularList(math.floor(
+        max_workers/int(bio_config.phylonet_threads)))
+    for h in bio_config.phylonet_hmax:
+        ret_spd = apps.setup_phylonet_data(
+            basedir, bio_config, h, inputs=[ret_rooted])
+        filename = os.path.join(
+            out_dir, (basedir['tree_method'] + '_' + h + '_' + bio_config.phylonet_input))
+        ret_phylonet = apps.phylonet(basedir, bio_config, filename, inputs=[
+                                     ret_spd], next_pipe=pool_phylo.next())
+        pool_phylo.current(ret_phylonet)
+        result.append(ret_phylonet)
+    return result
+
+
+def mrbayes_snaq(bio_config, basedir, prepare_to_run):
+    max_workers = bio_config.workflow_core*bio_config.workflow_node
+    result = list()
+    ret_tree = list()
+    datalist = list()
+    # append the input files
+    dir_ = os.path.join(os.path.join(basedir['dir'], "input"), "nexus")
+    datalist = glob.glob(os.path.join(dir_, '*.nex'))
+    ret_mbsum = list()
+    for input_file in datalist:
+        ret_mb = apps.mrbayes(basedir, bio_config,
+                              input_file=input_file, inputs=prepare_to_run)
+        ret_mbsum.append(apps.mbsum(basedir, bio_config,
+                         input_file=input_file, inputs=[ret_mb]))
+    ret_pre_bucky = apps.setup_bucky_data(
+        basedir, bio_config, inputs=ret_mbsum)
+    wait_for_all([ret_pre_bucky])
+    bucky_folder = os.path.join(basedir['dir'], "bucky")
+    prune_trees = glob.glob(os.path.join(bucky_folder, "*.txt"))
+    ret_bucky = list()
+    for prune_tree in prune_trees:
+        ret_bucky.append(apps.bucky(basedir, bio_config,
+                         prune_file=prune_tree, inputs=[ret_pre_bucky]))
+    ret_post_bucky = apps.setup_bucky_output(
+        basedir, bio_config, inputs=ret_bucky)
+    ret_pre_qmc = apps.setup_qmc_data(
+        basedir, bio_config, inputs=[ret_post_bucky])
+    ret_qmc = apps.quartet_maxcut(basedir, bio_config, inputs=[ret_pre_qmc])
+    ret_tree.append(apps.setup_qmc_output(
+        basedir, bio_config, inputs=[ret_qmc]))
+    logging.info("Using the Maximum Pseudo Likelihood Method")
+    pool_phylo = CircularList(math.floor(
+        max_workers/int(bio_config.snaq_threads)))
+    for h in bio_config.snaq_hmax:
+        ret_snq = apps.snaq(basedir, bio_config, h,
+                            inputs=ret_tree, next_pipe=pool_phylo.next())
+        pool_phylo.current(ret_snq)
+        result.append(ret_snq)
+    return result
+
+def prepare_to_run(config):
+    folder_list = list()
+    r = list()
+    phylip_folders = list()
+    for basedir in config.workload:
+        if basedir['dir'] not in phylip_folders:
+            r.append(apps.setup_phylip_data(basedir, config))
+            phylip_folders.append(basedir['dir'])
+        network_method = basedir['network_method']
+        tree_method = basedir['tree_method']
+        if (network_method == 'MPL'):
+            if (tree_method == 'RAXML'):
+                folder_list.extend(
+                    [config.raxml_dir, config.astral_dir, config.snaq_dir])
+            elif (tree_method == 'IQTREE'):
+                folder_list.extend(
+                    [config.iqtree_dir, config.astral_dir, config.snaq_dir])
+            elif (tree_method == 'MRBAYES'):
+                folder_list.extend([config.mrbayes_dir, config.bucky_dir,
+                                   config.mbsum_dir, config.quartet_maxcut_dir, config.snaq_dir])
+        elif (network_method == 'MP'):
+            if (tree_method == 'RAXML'):
+                folder_list.extend([config.raxml_dir, config.phylonet_dir])
+            elif (tree_method == 'IQTREE'):
+                folder_list.extend([config.iqtree_dir, config.phylonet_dir])
+        r.append(apps.create_folders(basedir, config, folders=folder_list))
+    return r
+
+
+def main(**kwargs):
+    logging.info('Starting the Workflow Orchestration')
+    if kwargs["config_file"] is not None:
+        config_file = kwargs["config_file"]
+    else:
+        config_file = 'default.ini'
+    if kwargs["workload_file"] is not None:
+        cf = bioconfig.ConfigFactory(
+            config_file, custom_workload=kwargs["workload_file"])
+    else:
+        cf = bioconfig.ConfigFactory(config_file)
+    bio_config = cf.build_config()
+    dkf_config = workflow_config(bio_config, **kwargs)
+    logging.info(f"{hash(bio_config)}")
+    dkf = parsl.load(dkf_config)
+    results = list()
+    prep = prepare_to_run(bio_config)
+    for basedir in bio_config.workload:
+        r = None
+        network_method = basedir['network_method']
+        tree_method = basedir['tree_method']
+        if (network_method == 'MPL'):
+            if (tree_method == 'RAXML'):
+                r = raxml_snaq(bio_config, basedir, prep)
+            elif (tree_method == 'IQTREE'):
+                r = iqtree_snaq(bio_config, basedir, prep)
+            elif (tree_method == 'MRBAYES'):
+                r = mrbayes_snaq(bio_config, basedir, prep)
+            else:
+                logging.error(
+                    f'Invalid parameter combination: {bio_config.network_method} and {bio_config.tree_method}')
+        elif (network_method == 'MP'):
+            if (tree_method == 'RAXML'):
+                r = raxml_phylonet(bio_config, basedir, prep)
+            elif (tree_method == 'IQTREE'):
+                r = iqtree_phylonet(bio_config, basedir, prep)
+            else:
+                logging.error(
+                    f'Invalid parameter combination: {bio_config.network_method} and {bio_config.tree_method}')
+        else:
+            logging.error(
+                f'Invalid network method: {bio_config.network_method}')
+        if r is not None:
+            results.extend(r)
+            # wait_for_all(r)
+    if bio_config.plot_networks == True:
+        plot = apps.plot_networks(bio_config, inputs=results)
+        wait_for_all([plot])
+    else:
+        wait_for_all(results)
+    parsl.dfk().cleanup() 
+    return
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description='Process the configuration file.')
+    parser.add_argument('-s', '--settings', help='Settings file',
+                        required=False, type=str, default=None)
+    parser.add_argument('-w', '--workload', help='Workload file',
+                        required=False, type=str, default=None)
+    parser.add_argument(
+        "-r", "--runinfo", help="Folder to store the Parsl logs", required=False, type=str, default=None)
+    parser.add_argument(
+        '-m', "--maxworkers", help="Max workers", required=False, type=int, default=None)
+
+    args = parser.parse_args()
+
+    main(config_file=args.settings, workload_file=args.workload,
+         max_workers=args.maxworkers, runinfo=args.runinfo)
+
+
+======================================================================
+FILE: requirements.txt
+======================================================================
+
+pandas
+biopython
+parsl
+parsl[monitoring]
+
+======================================================================
+FILE: scripts/plot.jl
+======================================================================
+
+using PhyloNetworks
+using PhyloPlots
+using RCall
+
+function getnamemp(network)
+    net_file = open(network, "r")
+    for line in eachline(net_file)
+        if length(line) > 0 && line[1] == '('
+            close(net_file)
+            return line
+        end
+    end
+end
+#---
+function getnamempl(network)
+    net_file = open(network, "r")
+    line = first(eachline(net_file))
+    net_string = ""
+    for i in 1:length(line)
+        net_string = string(net_string, line[i])
+        if line[i] == ';'
+            break
+        end
+    end
+    close(net_file)
+    return net_string
+end
+#---
+function plotnet(network, network_method)
+    net_string = ""
+    imagefilename = ""
+    if network_method == "MPL"
+        imagefilename = string(replace(network, ".out" => ".svg"))
+        net_string = getnamempl(network)
+    elseif network_method == "MP"
+        imagefilename = string(replace(network, ".nex" => ".svg"))
+        net_string = getnamemp(network)
+    end
+    if network_method == "MPL" || network_method == "MP" && length(net_string) > 0
+        net = readTopology(string(net_string))
+        R"svg"(imagefilename, width=10, height=10) # starts image file
+        R"par"(mar=[0,0,0,0]) # to reduce margins (no margins at all here)
+        plot(net, :R, showEdgeLength=false, showGamma=false);
+        R"dev.off()"; # wrap up and save image file
+        R"pdf"(string(replace(imagefilename, ".svg" => ".pdf")), width=10, height=10) # starts image file
+        R"par"(mar=[0,0,0,0]) # to reduce margins (no margins at all here)
+        plot(net, :R, showEdgeLength=false, showGamma=false);
+        R"dev.off()"; # wrap up and save image file
+    end
+end
+#---
+if length(ARGS) < 1
+    println("Missing arguments!")
+else
+    println("Plotting network")
+    #arg[1] = network file
+    #arg[2] = SNAQ (MPL) or Phylonet (MP)
+    networks = split(ARGS[1], ',')
+    for net in networks
+        println(net)
+        if last(split(strip(net), '.')) == "out"
+            plotnet(strip(net), "MPL") 
+        else
+            plotnet(strip(net), "MP") 
+        end
+    end
+    
+end
+
+
+======================================================================
+FILE: scripts/snaq.jl
+======================================================================
+
+#!/bin/env julia
+
+# Argument usage:
+# ARGS[1] = tree method (RAXML, IQTREE, MRBAYES)
+# ARGS[2] = path of the tree
+# ARGS[3] = path of the topology
+# ARGS[4] = output dir
+# ARGS[5] = num_workers
+# ARGS[6] = hmax
+# ARGS[7] = runs
+# ARGS[8] = (optional) outgroup
+
+println("Starting PhyloNetworks...")
+
+# Validate arguments
+if length(ARGS) < 7
+    println("Usage: script.jl <tree method> <tree path> <topology path> <output dir> <num_workers> <hmax> <runs> [outgroup]")
+    exit(1)
+end
+
+# Parse required arguments
+method = ARGS[1]
+tree_path = ARGS[2]
+topology_path = ARGS[3]
+output_dir = ARGS[4]
+num_workers = max(1, parse(Int, ARGS[5]) - 1)
+hmax = parse(Int, ARGS[6])
+runs = parse(Int, ARGS[7])
+outgroup = get(ARGS, 8, nothing)  # Optional
+
+println("Tree method: $method")
+println("Tree path: $tree_path")
+println("Topology path: $topology_path")
+println("Output folder: $output_dir")
+println("Number of processors: $num_workers")
+println("Hybridization max: $hmax")
+println("Number of runs: $runs")
+if outgroup !== nothing
+    println("Species mapping: $outgroup")
+end
+import Pkg
+
+# Ensure required packages are installed
+function ensure_installed(pkgs)
+    for pkg in pkgs
+        if Base.find_package(pkg) === nothing
+            println("Installing $pkg...")
+            Pkg.add(pkg)
+        end
+    end
+end
+
+required_pkgs = ["PhyloNetworks", "Distributed", "CSV"]
+ensure_installed(required_pkgs)
+
+# Import packages
+using PhyloNetworks
+using Distributed
+using CSV
+
+if num_workers > 0
+    addprocs(num_workers)
+end
+
+@everywhere using PhyloNetworks
+
+basedir = dirname(output_dir)
+name = string(replace(basename(basedir), "/" => ""), "_", method, "_MPL_", hmax)
+output = joinpath(output_dir, name)
+
+println("Using PhyloNetworks on every processor")
+
+# Process different tree methods
+if method in ["RAXML", "IQTREE"]
+    if outgroup !== nothing
+        genetrees = readMultiTopology(tree_path)
+        taxon_map = Dict{String, String}()
+        spec_list = split(outgroup, ';')
+        for spec in spec_list
+            sp = split(strip(spec), ':')
+            for allele in split(sp[2], ',')
+                taxon_map[allele] = sp[1]
+            end
+        end
+        println(taxon_map)
+        q, t = countquartetsintrees(genetrees, taxon_map)
+        df_sp = writeTableCF(q, t)
+        println(df_sp)
+        CSV.write(joinpath(output_dir, "tableCF_species.csv"), df_sp)
+        raxmlCF = readTableCF(joinpath(output_dir, "tableCF_species.csv"))
+    else
+        raxmlCF = readTrees2CF(tree_path, writeTab=false, writeSummary=false)
+    end
+    astraltree = readTopology(last(readlines(topology_path)))
+    net = snaq!(astraltree, raxmlCF, hmax=hmax, filename=output, runs=runs)
+
+elseif method == "MRBAYES"
+    buckyCF = readTableCF(tree_path)
+    qmc_tree = readTopology(topology_path)
+    net = snaq!(qmc_tree, buckyCF, hmax=hmax, filename=output, runs=runs)
+
+else
+    println("Invalid tree method! Supported methods: RAXML, IQTREE, MRBAYES")
+    exit(1)
+end
+
+
+======================================================================
+FILE: submit.sh
+======================================================================
+
+#!/bin/bash
+#SBATCH --nodes=3           #Numero de Nós
+#SBATCH --ntasks-per-node=1 #Numero de tarefas por Nó
+#SBATCH --cpus-per-task=24 #Numero de CPU por tarefa
+#SBATCH -p cpu_small         #Fila (partition) a ser utilizada
+#SBATCH -J Biocomp             #Nome job
+#SBATCH --exclusive          #Utilização exclusiva dos nós durante a execução do job
+#SBATCH --time=08:00:00
+#SBATCH -e slurm-%j.err
+#SBATCH -o slurm-%j.out
+
+
+
+
+echo Loading modules
+module load python/3.9.6
+source /scratch/pcmrnbio2/rafael.terra/meu_python/bin/activate
+#acessa o diretório onde o script está localizado
+cd /scratch/pcmrnbio2/rafael.terra/WF_parsl/biocomp_single
+#executa o script
+echo Starting Workflow Script
+echo Workload file: $WF
+echo Maximum workers: $MW
+python3 parsl_workflow.py -w $WF -s 1_thread.ini -m $MW
+
+#sbatch --export=ALL,SCRATCH=/scratch/pcmrnbio2/rafael.terra,WF=100g6t_iqtree_snaq.config,MW=1 submit.sh 
+
+
+======================================================================
+FILE: submit_on_ssd.sh
+======================================================================
+
+#!/bin/bash
+#SBATCH --nodes=1           #Numero de Nós
+#SBATCH --ntasks-per-node=24 #Numero de tarefas por Nó
+#SBATCH -p cpu_small         #Fila (partition) a ser utilizada
+#SBATCH -J HP2NET             #Nome job
+#SBATCH --exclusive          #Utilização exclusiva dos nós durante a execução do job
+#SBATCH --time=07:00:00
+#SBATCH -e slurm-%j.err
+#SBATCH -o slurm-%j.out
+
+#informacoes
+#lsblk
+#echo "of no ssd"
+#dd if=/dev/zero of=/tmp/out.txt oflag=direct bs=128k count=16k
+#echo "of no scratch"
+#dd if=/dev/zero of=/scratch/pcmrnbio2/rafael.terra/out.txt oflag=direct bs=128k count=16k
+
+SSD_DIR="/tmp/rafael"
+#cria pasta no ssd
+mkdir -p $SSD_DIR
+#lê o arquivo de workload 
+new_wf="$WF.ssd"
+buffer=''
+newline=$'\n'
+while IFS= read -r linha || [[ -n "$linha" ]]; do
+    echo "$linha"
+    split=($(echo "$linha" | tr '@' ' '))
+    split_slash=($(echo "${split[0]}" | tr '/' ' '))
+    folder_name=${split_slash[-1]}
+    new_folder="${SSD_DIR}/${folder_name}"
+    mkdir -p $new_folder
+    mkdir -p "${new_folder}/input"
+    cp -R "${split[0]}/input/." "${new_folder}/input"
+    buffer="${buffer}${new_folder}@${split[-1]}"
+    buffer+="${newline}"
+done < "$WF"
+    echo "$buffer" > $new_wf
+
+
+echo Loading modules
+module load python/3.8.2
+#acessa o diretório onde o script está localizado
+cd /scratch/pcmrnbio2/rafael.terra/WF_parsl/biocomp_single_ssd
+#executa o script
+echo Starting Workflow Script
+python3 parsl_workflow.py --wf $new_wf --cf teste.ini
+
+======================================================================
+FILE: tester.py
+======================================================================
+
+import parsl, apps, glob, bioconfig, os, logging, argparse, math, filecmp
+from pandas.core import base
+from datetime import datetime
+from infra_manager import workflow_config, wait_for_all, CircularList
+def test_raxml(bio_config, logger1 = None):
+    logger1.critical("Testing RAXML...")
+    basedir = {
+        "dir":os.path.join(os.getcwd(), "tests"),
+        "tree_method":"RAXML",
+        "network_method":"MPL",
+        "mapping":"",
+        "outgroup": ""
+    }
+    seed = 123
+    old_files = glob.glob(os.path.join(os.getcwd(), "tests/raxml/*.input"))
+    for f in old_files:
+        os.remove(f)
+    input_file = os.path.join(os.getcwd(), "tests/raxml/input.phy")
+    baseline_file = os.path.join(os.getcwd(), "tests/raxml/RAxML_bestTree.baseline")
+    out_file = os.path.join(os.getcwd(), "tests/raxml/RAxML_bestTree.input")
+    ret_tree = apps.raxml(basedir, bio_config, input_file=input_file, seed=seed)
+    try:
+        ret_tree.result()
+        if(filecmp.cmp(baseline_file, out_file)):
+            logger1.critical("\t...Passed!")
+        else:
+            logger1.critical("\t...Failed!")
+    except Exception as e:
+        logger1.critical("\t...Failed!")
+
+def test_iqtree(bio_config, logger1 = None):
+    logger1.critical("Testing IQTREE...")
+    basedir = {
+        "dir":os.path.join(os.getcwd(), "tests"),
+        "tree_method":"IQTREE",
+        "network_method":"MPL",
+         "mapping":"",
+        "outgroup": ""
+    }
+    seed = 123
+    input_file = os.path.join(os.getcwd(), "tests/iqtree/input.phy")
+    baseline_file = os.path.join(os.getcwd(), "tests/iqtree/baseline.treefile")
+    out_file = os.path.join(os.getcwd(), "tests/iqtree/input.phy.treefile")
+    ret_tree = apps.iqtree(basedir, bio_config, input_file=input_file, seed=seed)
+    try:
+        ret_tree.result()
+        if(filecmp.cmp(baseline_file, out_file)):
+            logger1.critical("\t...Passed!")
+        else:
+            logger1.critical("\t...Failed!")
+    except Exception as e:
+        logger1.critical("\t...Failed!")
+
+def test_astral(bio_config, logger1 = None):
+    logger1.critical("Testing ASTRAL...")
+    basedir = {
+        "dir":os.path.join(os.getcwd(), "tests"),
+        "tree_method":"RAXML",
+        "network_method":"MPL",
+         "mapping":"",
+        "outgroup": ""
+    }
+    seed = 123
+    input_file = os.path.join(os.getcwd(), "tests/astral/BSlistfiles")
+    baseline_file = os.path.join(os.getcwd(), "tests/astral/baseline.tre")
+    out_file = os.path.join(os.getcwd(), "tests/astral/besttree.tre")
+    ret_tree = apps.astral(basedir, bio_config, inputs=[input_file], seed=seed)
+    try:
+        ret_tree.result()
+        if(filecmp.cmp(baseline_file, out_file)):
+            logger1.critical("\t...Passed!")
+        else:
+            logger1.critical("\t...Failed!")
+    except Exception as e:
+        logger1.critical("\t...Failed!")
+
+def test_mbsum(bio_config, logger1 = None):
+    logger1.critical("Testing MBSUM...")
+    basedir = {
+        "dir":os.path.join(os.getcwd(), "tests"),
+        "tree_method":"MRBAYES",
+        "network_method":"MPL",
+         "mapping":"",
+        "outgroup": ""
+    }
+    input_file = os.path.join(os.getcwd(), "tests/mrbayes/input.nex.run1.t")
+    baseline_file = os.path.join(os.getcwd(), "tests/mbsum/baseline.sum")
+    out_file = os.path.join(os.getcwd(), "tests/mbsum/input.nex.sum")
+    ret_tree = apps.mbsum(basedir, bio_config, inputs=[input_file])
+    try:
+        ret_tree.result()
+        if(filecmp.cmp(baseline_file, out_file)):
+            logger1.critical("\t...Passed!")
+        else:
+            logger1.critical("\t...Failed!")
+    except Exception as e:
+        logger1.critical("\t...Failed!")
+
+def test_bucky(bio_config, logger1 = None):
+    pass
+def test_mrbayes(bio_config, logger1 = None):
+    logger1.critical("Testing MrBayes...")
+    basedir = {
+        "dir":os.path.join(os.getcwd(), "tests"),
+        "tree_method":"MRBAYES",
+        "network_method":"MPL",
+         "mapping":"",
+        "outgroup": ""
+    }
+    input_file = os.path.join(os.getcwd(), "tests/mrbayes/input.nex")
+    baseline_file = os.path.join(os.getcwd(), "tests/mrbayes/baseline.nex.run1.t")
+    out_file = os.path.join(os.getcwd(), "tests/mrbayes/input.nex.run1.t")
+    ret_tree = apps.quartet_maxcut(basedir, bio_config, inputs=input_file)
+    try:
+        ret_tree.result()
+        if(filecmp.cmp(baseline_file, out_file)):
+            logger1.critical("\t...Passed!")
+        else:
+            logger1.critical("\t...Failed!")
+    except Exception as e:
+        logger1.critical("\t...Failed!")
+
+def test_phylonet(bio_config, logger1 = None):
+    pass
+def test_snaq(bio_config, logger1 = None):
+    pass
+def test_quartetmaxcut(bio_config, logger1 = None):
+    logger1.critical("Testing Quartet Maxcut...")
+    basedir = {
+        "dir":os.path.join(os.getcwd(), "tests"),
+        "tree_method":"RAXML",
+        "network_method":"MPL",
+         "mapping":"",
+        "outgroup": ""
+    }
+    input_file = os.path.join(os.getcwd(), "tests/qmc/tests.txt")
+    baseline_file = os.path.join(os.getcwd(), "tests/qmc/baseline.tre")
+    out_file = os.path.join(os.getcwd(), "tests/qmc/tests.tre")
+    ret_tree = apps.quartet_maxcut(basedir, bio_config, inputs=input_file)
+    try:
+        ret_tree.result()
+        if(filecmp.cmp(baseline_file, out_file)):
+            logger1.critical("\t...Passed!")
+        else:
+            logger1.critical("\t...Failed!")
+    except Exception as e:
+        logger1.critical("\t...Failed!")
+
+
+def main(config_file='default.ini', workload_file = None):
+
+    if workload_file is not None:
+        cf = bioconfig.ConfigFactory(config_file, custom_workload = workload_file)
+    else:
+        cf = bioconfig.ConfigFactory(config_file)
+    bio_config = cf.build_config()
+    now = datetime.now()
+    date_time = now.strftime("%d-%m-%Y_%H-%M-%S")
+    name = bio_config.workflow_name
+    parsl.set_file_logger(f'{name}_script_{date_time}.output', level=logging.CRITICAL)
+    parsl.set_stream_logger(level=logging.CRITICAL)
+    logger1 = logging.getLogger("parsl")
+    logger1.critical('Starting the Testing module')
+    dkf_config = workflow_config(bio_config)
+    dkf = parsl.load(dkf_config)
+    test_raxml(bio_config, logger1)
+    test_iqtree(bio_config, logger1)
+    test_astral(bio_config, logger1)
+    test_bucky(bio_config, logger1)
+    test_quartetmaxcut(bio_config, logger1)
+    test_mbsum(bio_config, logger1)
+    test_mrbayes(bio_config, logger1)
+    test_phylonet(bio_config, logger1)
+    test_snaq(bio_config, logger1)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Process the configuration file.')
+    parser.add_argument('--cf', help='Settings file', required=False, type=str)
+    args = parser.parse_args()
+    if args.cf is not None:
+        main(config_file=args.cf)
+    else:
+        main()
+
+======================================================================
+FILE: tools/visualizer.py
+======================================================================
+
+import numpy as np
+import os
+import glob
+import re
+import argparse
+import pygame
+import math
+import tkinter
+import tkinter.messagebox
+import tkinter.filedialog
+from datetime import datetime
+
+TIME_PATTERN = '%Y-%m-%d %H:%M:%S.%f'
+WIDTH = 1280
+HEIGHT = 720
+# initiate pygame font
+pygame.font.init()
+
+
+def create_numbers(screen, t0, tf, beg, end, interval):
+    t0_c = datetime.strptime(t0, TIME_PATTERN)
+    tf_c = datetime.strptime(tf, TIME_PATTERN)
+    diftot_seconds = (tf_c - t0_c).total_seconds()
+    font = pygame.font.SysFont(pygame.font.get_default_font(), 16)
+    numbers = np.arange(beg, end+1, interval)
+    i = 1
+    for number in numbers:
+        #pygame.draw.rect(screen, color=(0,0,0), rect=(i, HEIGHT-26, 1, 2))
+        img = font.render(
+            ('{0:.1f}'.format((number*diftot_seconds)/WIDTH)), True, (0, 0, 0))
+        screen.blit(img, (i, HEIGHT - 24))
+
+        i += (end)/len(numbers)
+
+
+def convert_timestamp(t0, tf, tx):
+    beg = datetime.strptime(t0, TIME_PATTERN)
+    end = datetime.strptime(tf, TIME_PATTERN)
+    x = datetime.strptime(tx, TIME_PATTERN)
+    diftot_seconds = (end - beg).total_seconds()
+    dif_seconds = (x - beg).total_seconds()
+    return ((WIDTH * dif_seconds) / diftot_seconds)
+
+
+def get_timestamp_dif(t0, tx):
+    beg = datetime.strptime(t0, TIME_PATTERN)
+    x = datetime.strptime(tx, TIME_PATTERN)
+    dif_seconds = (x - beg).total_seconds()
+    return dif_seconds
+
+
+def get_color(name):
+    if name == 'raxml':
+        return pygame.Color("#E04D01")
+    elif name == 'snaq':
+        return pygame.Color("#3A3845")
+    elif name == 'iqtree':
+        return pygame.Color("#61A4BC")
+    elif name == 'mrbayes':
+        return pygame.Color("#F10086")
+    elif name == 'bucky':
+        return pygame.Color("#E0DDAA")
+    elif name == 'mbsum':
+        return pygame.Color("#603601")
+    elif name == 'maxcut':
+        return pygame.Color("#270082")
+    elif name == 'phylonet':
+        return pygame.Color("#8B9A46")
+    elif name == 'plot':
+        return pygame.Color("#F05454")
+    elif name == 'astral':
+        return pygame.Color("#9A0680")
+    else:
+        return pygame.Color("#383838")
+
+
+def draw_rectangles(screen, tasks, task_times, t0, tf):
+    tasks_sorted = dict(sorted(tasks.items()))
+    run = -1
+    y_axis = -1
+    if len(tasks.keys()) > (HEIGHT/2):  # that means at least 2 pixels per rec
+        rect_size = (HEIGHT/(0.6*len(tasks.keys())))
+    else:
+        rect_size = (HEIGHT/(len(tasks.keys())*1.1))
+    rect_list = list()
+    name_list = list()
+    for task in tasks_sorted:
+        beg = convert_timestamp(t0, tf, task_times[task][0])
+        end = convert_timestamp(t0, tf, task_times[task][1])
+        dim = end - beg
+        if run > beg:
+            y_axis += 1
+            run = max(end, run)
+        else:
+            y_axis = 0
+            run = end
+        rect_list.append(pygame.draw.rect(screen, color=get_color(
+            tasks[task]), rect=(beg, (rect_size+0.2)*y_axis, dim, (rect_size/(1)))))
+        name_list.append(
+            f'Task {task}: {tasks[task]}\nTime spent: {get_timestamp_dif(task_times[task][0], task_times[task][1]):.2f} seconds')
+    return (rect_list, name_list)
+
+
+def parse_tasks(runinfo_dir):
+    tasks = dict()
+    tasks_file_path = os.path.join(
+        runinfo_dir, os.path.join('task_logs', '0000'))
+    tasks_files = glob.glob(os.path.join(tasks_file_path, "*"))
+    for task in tasks_files:
+        task_array = os.path.basename(task).split('_')
+        task_name = (task_array[len(task_array) - 1]).split('.')[0]
+        tasks[task_array[1]] = task_name
+    return tasks
+
+
+def parse_times(runinfo_dir, tasks):
+    log_path = os.path.join(runinfo_dir, 'parsl.log')
+    time_launch = list()
+    time_complete = list()
+    with open(log_path, 'r') as log:
+        for line in log.readlines():
+            if re.search('Task \d+ launched', line):
+                time_launch.append(line)
+            elif re.search('Task \d+ completed', line):
+                time_complete.append(line)
+        log.close()
+    task_times = dict()
+    for task in tasks.keys():
+        launch = ""
+        complete = ""
+        for t in time_launch:
+            if re.search(f'Task {int(task)}', t):
+                launch = re.match('\d+-\d+-\d+\s\d+:\d+:\d+\.\d+', t).group(0)
+                break
+        for t in time_complete:
+            if re.search(f'Task {int(task)}', t):
+                complete = re.match(
+                    '\d+-\d+-\d+\s\d+:\d+:\d+\.\d+', t).group(0)
+                break
+        if not (launch == "") and not (complete == ""):
+            task_times[task] = (launch, complete)
+    return task_times
+
+def print_tasks_time(tasks, tasks_time):
+    sorted_tasks = sorted(tasks.keys())
+    for task in sorted_tasks:
+        print(f"#########################################")
+        print(f"      Task ID: {task} -> {tasks[task]}")
+        print(f"Launched: {tasks_time[task][0]}")
+        print(f"Completed: {tasks_time[task][1]}")
+        print(f"Elapsed time: {get_timestamp_dif(tasks_time[task][0],tasks_time[task][1])}")
+
+def get_time_per_app(tasks, tasks_time, dir_):
+    beg, end = get_times(dir_)
+    time_per_task = dict()
+    for task in sorted(tasks.keys()):
+        task_name = tasks[task]
+        task_id = int(task)
+        if task_name in time_per_task:
+            task_beg, task_end = time_per_task[task_name]
+            new_task_beg, new_task_end = tasks_time[task_id]
+            if(task_beg > new_task_beg):
+                if(task_end < new_task_end):
+                    time_per_task[task_name] = (new_task_beg, new_task_end)
+                else:
+                    time_per_task[task_name] = (new_task_beg, task_end)
+            else:
+                if(task_end < new_task_end):
+                    time_per_task[task_name] = (task_beg, task_end)
+        else:
+            time_per_task[task_name] = tasks_time[task_id]
+    print("Time wasted in each app")
+    for task in time_per_task.keys():
+        task_beg, task_end = time_per_task[task_name]
+        total_time = get_timestamp_dif(task_beg, task_end)
+        print(f"App {task} took {total_time} second(s).")
+
+def get_time_proccessing_per_app(tasks, tasks_time, dir_):
+    beg, end = get_times(dir_)
+    time_per_task = dict()
+    for task in sorted(tasks.keys()):
+        task_name = tasks[task]
+        task_id = int(task)
+        if task_name in time_per_task:
+            new_task_beg, new_task_end = tasks_time[task_id]
+            time_per_task[task_name] += get_timestamp_dif(new_task_beg, new_task_end)
+        else:
+            time_per_task[task_name] = tasks_time[task_id]
+    print("Processing time per app")
+    for task in time_per_task.keys():
+        print(f"App {task} took {time_per_task[task_name]} second(s).")
+
+def get_times(dir_):
+    log = os.path.join(dir_, 'parsl.log')
+    first_line = ""
+    last_line = ""
+    with open(log, "rb") as file:
+        try:
+            file.seek(0)
+            first_line = file.readline().decode()
+            file.seek(-2, os.SEEK_END)
+            while file.read(1) != b'\n':
+                file.seek(-2, os.SEEK_CUR)
+        except OSError:
+            file.seek(0)
+        last_line = file.readline().decode()
+    time_begin = re.match('\d+-\d+-\d+\s\d+:\d+:\d+\.\d+', first_line).group(0)
+    time_end = re.match('\d+-\d+-\d+\s\d+:\d+:\d+\.\d+', last_line).group(0)
+    return (time_begin, time_end)
+
+
+def open_folder():
+    top = tkinter.Tk()
+    top.withdraw()
+    folder = tkinter.filedialog.askdirectory(parent=top)
+    top.destroy()
+    return folder
+
+
+def create_dialog(message):
+    diag = tkinter.Tk()
+    diag.withdraw()
+    message_box = tkinter.messagebox.showinfo(
+        title='Task', message=message, parent=diag)
+    diag.destroy()
+
+
+def main(dir_):
+    background_colour = (255, 255, 255)
+    pygame.display.set_caption(os.path.basename(dir_))
+    tasks = parse_tasks(dir_)
+    tasks_time = parse_times(dir_, tasks)
+    print_tasks_time(tasks, tasks_time)
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    screen.fill(background_colour)
+    beg = 0
+    time_begin, time_end = get_times(dir_)
+    end = convert_timestamp(time_begin, time_end, time_end)
+    create_numbers(screen, time_begin, time_end, beg, end, math.ceil(WIDTH/10))
+    rect_list, name_list = draw_rectangles(
+        screen, tasks, tasks_time, time_begin, time_end)
+    pygame.display.flip()
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            if event.type == pygame.MOUSEBUTTONUP:
+                for i in range(0, len(rect_list)):
+                    if rect_list[i].collidepoint(pygame.mouse.get_pos()):
+                        create_dialog(name_list[i])
+                        break
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description='Extract informations from parsl runinfo log files')
+    parser.add_argument('-d', '--dir', type=str,
+                        help='Runinfo folder', required=False)
+    args = parser.parse_args()
+    if args.dir is not None:
+        runinfo_dir = args.dir
+    else:
+        runinfo_dir = open_folder()
+
+    main(runinfo_dir)
+
+
+======================================================================
+FILE: utils.py
+======================================================================
+
+import functools
+from typing import Any
+import logging
+
+logger = logging.getLogger(__name__)
+class Cache():
+    _table = dict()
+
+    def __init__(self) -> None:
+        self._table = dict()
+    
+    def __getitem__(self, key):
+        try:
+            return self._table[key]
+        except KeyError:
+            raise KeyError(key)
+    def __setitem__(self, key, value):
+            self._table[key] = value
+    
+    def __repr__(self) -> str:
+        return self._table.__repr__()
+    
+    def getItem(self, key):
+        if key not in self._table.keys():
+            return None
+        else:
+            return self._table[key]
+
+def tuplify(arguments: dict):
+    return tuple((k, tuple(v)) for k, v in arguments.items())
+
+
+def app_reuse(cache, args_to_ignore):
+    """Function to be used as decorator to allow the reuse (cache) of some apps functions.
+
+    At least until now, the apps need to contain only named arguments (kwargs)
+
+    Args:
+        cache (Cache's class object): Object to store the cache items
+        args_to_ignore (list): List containing the arguments to be ignored when caching
+    
+    Example of use:
+
+    @app_reuse(cache=Cache(), args_to_ignore=["bar"])\\
+    def foo(bar):\\
+        return "foo" + str(bar)
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper_decorator(*args, **kwargs):
+            filtered_kwargs = dict()
+            for kwarg in kwargs.keys():
+                if kwarg not in args_to_ignore:
+                    filtered_kwargs[kwarg] = kwargs[kwarg]
+            t_args = tuplify(filtered_kwargs)
+            key= hash(t_args)
+            try:
+                value = cache[key]
+                if value:
+                    logger.debug("Value is already in the cache")
+                return value
+            except KeyError:
+                ret = func(*args, **kwargs)
+                logger.debug("Value is not in the cache. Adding!")
+                cache[key] = ret
+                return ret
+            
+        return wrapper_decorator
+    return decorator
+
+
+class CircularList:
+    def __init__(self, slots: int) -> None:
+        if not slots:
+            raise ValueError
+        self.list = [None for _ in range(slots)]
+        self.index = 0
+        self.max_index = len(self.list) - 1
+
+    def next(self) -> Any:
+        if self.index == self.max_index:
+            self.index = 0
+        else:
+            self.index += 1
+        return self.list[self.index]
+
+    def current(self, value: Any) -> None:
+        self.list[self.index] = value
+        return
+

@@ -1,0 +1,394 @@
+{
+"framework": {
+"name": "HP2Net",
+"purpose": "Phylogenetic workflow framework for inference of gene trees, species trees and phylogenetic networks.",
+"workflow_implementation": "parsl_workflow.py",
+"implemented_workflows": [
+"RAxML-SNaQ",
+"RAxML-PhyloNet",
+"IQTREE-SNaQ",
+"IQTREE-PhyloNet",
+"MrBayes-SNaQ"
+]
+},
+
+"tools": {
+"RAxML": {
+"category": "gene_tree_inference",
+"role": "Infer phylogenetic gene trees from sequence alignments.",
+"input": "sequence alignments in PHYLIP format",
+"output": "gene trees",
+"implemented": true
+},
+
+
+"IQ-TREE": {
+  "category": "gene_tree_inference",
+  "role": "Infer phylogenetic gene trees from sequence alignments.",
+  "input": "sequence alignments in PHYLIP format",
+  "output": "gene trees",
+  "implemented": true
+},
+
+"MrBayes": {
+  "category": "gene_tree_inference",
+  "role": "Infer phylogenetic gene trees using Bayesian inference.",
+  "input": "sequence alignments in NEXUS format",
+  "output": "Bayesian gene tree results",
+  "implemented": true
+},
+
+"MBSUM": {
+  "category": "tree_processing",
+  "role": "Summarize MrBayes output for downstream concordance analysis.",
+  "input": "MrBayes output",
+  "output": "summarized tree data",
+  "implemented": true
+},
+
+"BUCKy": {
+  "category": "concordance_analysis",
+  "role": "Estimate concordance information from summarized Bayesian gene tree data.",
+  "input": "MBSUM-derived tree data",
+  "output": "concordance information",
+  "implemented": true
+},
+
+"ASTRAL": {
+  "category": "species_tree_inference",
+  "role": "Infer a species tree from gene trees.",
+  "input": "gene trees",
+  "output": "species tree",
+  "implemented": true
+},
+
+"Quartet MaxCut": {
+  "category": "species_tree_inference",
+  "role": "Infer a tree from quartet information.",
+  "input": "quartet data generated from concordance analysis",
+  "output": "species tree",
+  "implemented": true
+},
+
+"SNaQ": {
+  "category": "network_inference",
+  "role": "Infer phylogenetic networks using maximum pseudo-likelihood.",
+  "input": "species tree or quartet-based tree information supported by the workflow",
+  "output": "phylogenetic network",
+  "method": "maximum pseudo-likelihood",
+  "implemented": true
+},
+
+"PhyloNet": {
+  "category": "network_inference",
+  "role": "Infer phylogenetic networks from rooted phylogenetic trees.",
+  "input": "rooted phylogenetic trees",
+  "output": "phylogenetic network",
+  "methods": [
+    "maximum parsimony",
+    "maximum likelihood",
+    "maximum pseudo-likelihood"
+  ],
+  "implemented": true
+},
+
+"root_tree": {
+  "category": "tree_processing",
+  "role": "Root gene trees before PhyloNet network inference.",
+  "input": "gene trees",
+  "output": "rooted gene trees",
+  "implemented": true
+}
+
+},
+
+"supported_compositions": [
+  {
+    "steps": ["RAxML", "ASTRAL"],
+    "supported": true,
+    "implemented": true,
+    "implemented_as_part_of": "RAxML-SNaQ",
+    "description": "RAxML gene-tree inference followed by ASTRAL species-tree inference is implemented as the initial stages of the RAxML-SNaQ workflow."
+  },
+  {
+    "steps": ["IQ-TREE", "ASTRAL"],
+    "supported": true,
+    "implemented": true,
+    "implemented_as_part_of": "IQTREE-SNaQ",
+    "description": "IQ-TREE gene-tree inference followed by ASTRAL species-tree inference is implemented as the initial stages of the IQTREE-SNaQ workflow."
+  },
+  {
+    "steps": ["RAxML", "ASTRAL", "SNaQ"],
+    "supported": true,
+    "implemented": true,
+    "implemented_as_part_of": "RAxML-SNaQ"
+  },
+  {
+    "steps": ["IQ-TREE", "ASTRAL", "SNaQ"],
+    "supported": true,
+    "implemented": true,
+    "implemented_as_part_of": "IQTREE-SNaQ"
+  }
+],
+
+"workflows": {
+"RAxML-SNaQ": {
+"implemented": true,
+"network_method": "MPL",
+"steps": [
+"RAxML",
+"ASTRAL",
+"SNaQ"
+],
+"implementation_function": "raxml_snaq",
+"description": "Infer gene trees with RAxML, infer a species tree with ASTRAL, then infer a network with SNaQ using maximum pseudo-likelihood."
+},
+
+"RAxML-PhyloNet": {
+  "implemented": true,
+  "network_method": "MP",
+  "steps": [
+    "RAxML",
+    "root_tree",
+    "PhyloNet"
+  ],
+  "description": "Infer gene trees with RAxML, root the trees, then infer a network with PhyloNet using maximum parsimony.",
+  "implementation_function": "raxml_phylonet"
+},
+
+"IQTREE-SNaQ": {
+  "implemented": true,
+  "network_method": "MPL",
+  "steps": [
+    "IQ-TREE",
+    "ASTRAL",
+    "SNaQ"
+  ],
+  "description": "Infer gene trees with IQ-TREE, infer a species tree with ASTRAL, then infer a network with SNaQ using maximum pseudo-likelihood.",
+  "implementation_function": "iqtree_snaq"
+},
+
+"IQTREE-PhyloNet": {
+  "implemented": true,
+  "network_method": "MP",
+  "steps": [
+    "IQ-TREE",
+    "root_tree",
+    "PhyloNet"
+  ],
+  "description": "Infer gene trees with IQ-TREE, root the trees, then infer a network with PhyloNet using maximum parsimony.",
+  "implementation_function": "iqtree_phylonet"
+},
+
+"MrBayes-SNaQ": {
+  "implemented": true,
+  "network_method": "MPL",
+  "steps": [
+    "MrBayes",
+    "MBSUM",
+    "BUCKy",
+    "Quartet MaxCut",
+    "SNaQ"
+  ],
+  "description": "Infer Bayesian gene trees with MrBayes, summarize them with MBSUM, estimate concordance with BUCKy, infer a tree with Quartet MaxCut, then infer a network with SNaQ using maximum pseudo-likelihood.",
+  "implementation_function": "mrbayes_snaq"
+}
+
+},
+
+"interfaces": [
+{
+"producer": "RAxML",
+"output": "gene trees",
+"consumer": "ASTRAL",
+"input": "gene trees",
+"supported": true,
+"used_by": [
+"RAxML-SNaQ"
+]
+},
+
+{
+  "producer": "RAxML",
+  "output": "gene trees",
+  "transform": "root_tree",
+  "consumer": "PhyloNet",
+  "input": "rooted gene trees",
+  "supported": true,
+  "used_by": [
+    "RAxML-PhyloNet"
+  ]
+},
+
+{
+  "producer": "IQ-TREE",
+  "output": "gene trees",
+  "consumer": "ASTRAL",
+  "input": "gene trees",
+  "supported": true,
+  "used_by": [
+    "IQTREE-SNaQ"
+  ]
+},
+
+{
+  "producer": "IQ-TREE",
+  "output": "gene trees",
+  "transform": "root_tree",
+  "consumer": "PhyloNet",
+  "input": "rooted gene trees",
+  "supported": true,
+  "used_by": [
+    "IQTREE-PhyloNet"
+  ]
+},
+
+{
+  "producer": "MrBayes",
+  "output": "Bayesian gene tree results",
+  "consumer": "MBSUM",
+  "input": "MrBayes output",
+  "supported": true,
+  "used_by": [
+    "MrBayes-SNaQ"
+  ]
+},
+
+{
+  "producer": "MBSUM",
+  "output": "summarized tree data",
+  "consumer": "BUCKy",
+  "input": "MBSUM-derived tree data",
+  "supported": true,
+  "used_by": [
+    "MrBayes-SNaQ"
+  ]
+},
+
+{
+  "producer": "BUCKy",
+  "output": "concordance information",
+  "consumer": "Quartet MaxCut",
+  "input": "concordance information",
+  "supported": true,
+  "used_by": [
+    "MrBayes-SNaQ"
+  ]
+},
+
+{
+  "producer": "Quartet MaxCut",
+  "output": "species tree",
+  "consumer": "SNaQ",
+  "input": "tree information",
+  "supported": true,
+  "used_by": [
+    "MrBayes-SNaQ"
+  ]
+},
+
+{
+  "producer": "ASTRAL",
+  "output": "species tree",
+  "consumer": "SNaQ",
+  "input": "species tree information",
+  "supported": true,
+  "used_by": [
+    "RAxML-SNaQ",
+    "IQTREE-SNaQ"
+  ]
+},
+
+{
+  "producer": "ASTRAL",
+  "output": "species tree",
+  "consumer": "PhyloNet",
+  "input": "rooted gene trees",
+  "supported": false,
+  "reason": "No ASTRAL-to-PhyloNet interface is implemented in HP2Net."
+}
+
+],
+
+"constraints": {
+"implemented_tree_methods": [
+"RAxML",
+"IQ-TREE",
+"MrBayes"
+],
+
+"implemented_network_methods": [
+  "MPL",
+  "MP"
+],
+
+"network_method_mapping": {
+  "MPL": [
+    "SNaQ"
+  ],
+  "MP": [
+    "PhyloNet"
+  ]
+},
+
+"workflow_combinations": {
+  "MPL": [
+    "RAxML-SNaQ",
+    "IQTREE-SNaQ",
+    "MrBayes-SNaQ"
+  ],
+  "MP": [
+    "RAxML-PhyloNet",
+    "IQTREE-PhyloNet"
+  ]
+},
+
+"unsupported_combinations": [
+  "MrBayes-PhyloNet"
+],
+
+"resource_model": {
+  "description": "HP2Net distributes tool executions through Parsl workers.",
+  "worker_calculation": "max_workers = workflow_core * workflow_node",
+  "tree_pool_calculation": "floor(max_workers / tree_threads)",
+  "network_pool_calculation": "floor(max_workers / network_threads)",
+  "requirement": "The relevant thread count must not exceed max_workers.",
+  "failure_condition": "If floor(max_workers / threads) equals zero, CircularList is initialized with zero slots and execution fails."
+}
+
+},
+
+"implementation": {
+"workflow_dispatch": {
+"MPL": {
+"RAxML": "raxml_snaq",
+"IQ-TREE": "iqtree_snaq",
+"MrBayes": "mrbayes_snaq"
+},
+"MP": {
+"RAxML": "raxml_phylonet",
+"IQ-TREE": "iqtree_phylonet"
+}
+},
+
+"preparation": {
+  "all_workflows": [
+    "setup_phylip_data",
+    "create_folders"
+  ],
+  "PhyloNet_workflows": [
+    "setup_tree_output",
+    "root_tree",
+    "setup_phylonet_data"
+  ]
+},
+
+"source_of_truth": {
+  "workflow_composition": "parsl_workflow.py",
+  "tool_execution": "apps.py",
+  "configuration": "bioconfig.py",
+  "runtime_infrastructure": "infra_manager.py",
+  "utility_behavior": "utils.py"
+}
+}
+}

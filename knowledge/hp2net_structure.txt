@@ -1,0 +1,25 @@
+HP2Net program structure:
+
+├── apps.py
+│   Defines the Parsl applications that execute phylogenetic analysis tools and workflow steps.
+├── parsl_workflow.py
+│   Defines the implemented phylogenetic workflow compositions and their execution order.
+├── bioconfig.py
+│   Parses workflow configuration, tool parameters, resources, and dataset definitions.
+├── infra_manager.py
+│   Configures Parsl execution environments, providers, workers, and resource management.
+├── config/
+│   ├── default.ini
+│   │   Defines default workflow methods, tool paths, computational resources, and tool parameters.
+│   ├── work.config
+│   │   Defines input datasets and optionally overrides the tree and network methods.
+│   ├── parsl.env
+│   │   Defines the execution environment for installed tools.
+│   └── parsl_slurm.env
+│       Defines the execution environment for SLURM systems.
+├── Dockerfile
+│   Defines the container environment and installs the software dependencies required by HP2Net.
+├── scripts/
+│   Auxiliary scripts used by specific workflow components.
+└── utils.py
+    Provides workflow utilities including caching and resource/task management helpers.
