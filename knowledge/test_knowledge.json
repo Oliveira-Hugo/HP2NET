@@ -1,0 +1,30 @@
+{
+  "tools": {
+    "BUCKy": {
+      "type": "gene_tree_concordance",
+      "description": "Bayesian concordance analysis of gene trees"
+    },
+    "Quartet MaxCut": {
+      "type": "quartet_topology",
+      "description": "Constructs species trees and quartet topologies from concordance factors"
+    },
+    "SNaQ": {
+      "type": "network_inference",
+      "description": "Infers phylogenetic networks using maximum pseudo-likelihood"
+    }
+  },
+  "interfaces": [
+    {
+      "producer": "BUCKy",
+      "consumer": "Quartet MaxCut",
+      "supported": true
+    },
+    {
+      "producer": "Quartet MaxCut",
+      "consumer": "SNaQ",
+      "supported": true
+    }
+  ],
+  "workflows": {},
+  "supported_compositions": []
+}
