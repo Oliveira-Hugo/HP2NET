@@ -1,13 +1,19 @@
+"""
+phylo_agent.py
+=================
+Scientific workflow planning agent for HP2Net. Translates natural language user requests into validated sequences of bioinformatics tool executions using local LLM generation coupled with deterministic Python validation logic.
+"""
+
 import json
 import re
 import requests
 import time
 from pathlib import Path
 
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
-MODEL = "llama3.1:8b"
+OLLAMA_API_ENDPOINT = "http://127.0.0.1:11434/api/generate"
+MODEL_NAME = "llama3.1:8b"
 
-KNOWLEDGE_FILE = (
+KNOWLEDGE_BASE_PATH = (
     Path(__file__).resolve().parent
     / "knowledge"
     / "hp2net_knowledge.json"
@@ -16,9 +22,7 @@ KNOWLEDGE_FILE = (
 SYSTEM_PROMPT = """
 You are a scientific workflow planner for HP2Net.
 
-Your task is to translate a user's scientific request into the complete sequence
-of software tools required to satisfy that request, using only the workflows and
-tools provided in HP2Net knowledge.
+Your task is to translate a user's scientific request into the complete sequence of software tools required to satisfy that request, using only the workflows and tools provided in HP2Net knowledge.
 
 IMPORTANT:
 You MUST return exactly one JSON object.
@@ -34,12 +38,9 @@ IMPORTANT DISTINCTION:
 
 The user's request defines the required endpoints of the workflow.
 
-You may infer missing intermediate tools only between tools explicitly requested
-by the user. Never add tools before the first requested tool or after the last
-requested tool.
+You may infer missing intermediate tools only between tools explicitly requested by the user. Never add tools before the first requested tool or after the last requested tool.
 
-A longer implemented workflow must not be used to extend the user's request
-beyond its stated endpoints.
+A longer implemented workflow must not be used to extend the user's request beyond its stated endpoints.
 
 For example:
 
@@ -54,37 +55,22 @@ User: "Root the gene trees and then use PhyloNet to infer a phylogenetic network
 Correct:
 ["root_tree", "PhyloNet"]
 
-Do not substitute or add downstream tools merely because they appear in a
-longer implemented workflow.
+Do not substitute or add downstream tools merely because they appear in a longer implemented workflow.
 
 Rules:
 1. "steps" must contain ONLY tool names in execution order.
-2. The steps must represent the complete sequence of tools required to satisfy
-   the user's stated request.
-3. If the user explicitly specifies two tools as the start and end of the
-   requested sequence, infer intermediate tools only if they are required to
-   connect those tools in an implemented or supported HP2Net composition.
-4. Do NOT omit intermediate tools merely because the user did not explicitly
-   mention them.
-5. Use the workflow descriptions and workflow step sequences provided in the
-   HP2Net knowledge as the authoritative source for intermediate steps.
+2. The steps must represent the complete sequence of tools required to satisfy the user's stated request.
+3. If the user explicitly specifies two tools as the start and end of the requested sequence, infer intermediate tools only if they are required to connect those tools in an implemented or supported HP2Net composition.
+4. Do NOT omit intermediate tools merely because the user did not explicitly mention them.
+5. Use the workflow descriptions and workflow step sequences provided in the HP2Net knowledge as the authoritative source for intermediate steps.
 6. Do not invent tools. Use only tools mentioned in HP2Net knowledge.
 7. Do not infer execution status, implementation status, or validation results.
 8. Preserve the exact tool names used in HP2Net knowledge.
-9. Do not add tools merely to complete an implemented workflow if those tools
-   were not required by the user's request or by a supported composition
-   connecting the requested endpoints.
-10. Preserve the endpoints specified by the user. Do not add tools after the
-    requested endpoint or before the requested starting tool.
-11. Intermediate tools may be inferred only when they are required to connect
-    the requested tools within an implemented or supported workflow composition.
-12. If the requested combination is not supported by any implemented workflow
-    or supported composition, do not force it into an existing workflow. Return
-    the requested tools in the order implied by the user's request and let the
-    Python validation determine whether the composition is supported.
-13. Do not infer missing upstream tools. For example, if the user asks to root
-    gene trees and then use PhyloNet, do not automatically add RAxML or IQ-TREE
-    unless the user specifies the gene-tree inference method.
+9. Do not add tools merely to complete an implemented workflow if those tools were not required by the user's request or by a supported composition connecting the requested endpoints.
+10. Preserve the endpoints specified by the user. Do not add tools after the requested endpoint or before the requested starting tool.
+11. Intermediate tools may be inferred only when they are required to connect the requested tools within an implemented or supported workflow composition.
+12. If the requested combination is not supported by any implemented workflow or supported composition, do not force it into an existing workflow. Return the requested tools in the order implied by the user's request and let the Python validation determine whether the composition is supported.
+13. Do not infer missing upstream tools. For example, if the user asks to root gene trees and then use PhyloNet, do not automatically add RAxML or IQ-TREE unless the user specifies the gene-tree inference method.
 
 Example of completing intermediate steps:
 
@@ -110,8 +96,7 @@ If the user requests:
 the correct steps are:
 ["RAxML", "root_tree"]
 
-Do not extend the sequence with tools that occur after root_tree in a longer
-implemented workflow.
+Do not extend the sequence with tools that occur after root_tree in a longer implemented workflow.
 
 Example of preserving a missing upstream step:
 
@@ -125,103 +110,169 @@ Do not add RAxML or IQ-TREE because they occur before root_tree in an
 implemented workflow.
 """
 
+def read_knowledge_base():
+    """Load and parse the JSON knowledge base file for HP2Net.
+    Input:
+        None.
+    Output:
+        dict: Parsed HP2Net knowledge base.
+    Raises:
+        FileNotFoundError: If the knowledge base file does not exist.
+    """
+    if not KNOWLEDGE_BASE_PATH.exists():
+        raise FileNotFoundError(f"Knowledge file not found: {KNOWLEDGE_BASE_PATH}")
+    with open(KNOWLEDGE_BASE_PATH, "r", encoding="utf-8") as file_stream:
+        return json.load(file_stream)
 
-def load_knowledge():
-    if not KNOWLEDGE_FILE.exists():
-        raise FileNotFoundError(
-            f"Knowledge file not found: {KNOWLEDGE_FILE}"
-        )
-    with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+def normalize_string(raw_text):
+    """Normalize text and standardize known tool name variants.
+    Input:
+        raw_text (str): User text or tool names to normalize.
 
-def normalize_text(text):
-    text = text.lower()
+    Output:
+        str: Normalized text with standardized terminology.
+    """
+    lowercased_text = raw_text.lower()
     replacements = {
-        "iq-tree": "iqtree",
-        "iq tree": "iqtree",
-        "iqtree2": "iqtree",
-        "phylo-net": "phylonet",
-        "phylo net": "phylonet",
-        "mr bayes": "mrbayes",
-        "mr-bayes": "mrbayes",
-        "maximum pseudo likelihood": "mpl",
-        "maximum pseudo-likelihood": "mpl",
-        "maximum parsimony": "mp"
+        ("iq-tree", "iq tree", "iqtree2", "iq-tree2", "iq tree 2"): "iqtree",
+        ("phylo-net", "phylo net"): "phylonet",
+        ("mr bayes", "mr-bayes"): "mrbayes",
+        ("maximum pseudo likelihood", "maximum pseudo-likelihood"): "mpl",
+        ("maximum parsimony",): "mp"
     }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    return text
+    for variants, canonical_form in replacements.items():
+        for variant in variants:
+            lowercased_text = lowercased_text.replace(variant, canonical_form)
+    return lowercased_text
 
-def detect_tools(query, knowledge):
-    normalized_query = normalize_text(query)
-    detected = []
-    for tool_name in knowledge["tools"]:
-        normalized_tool = normalize_text(tool_name)
-        pattern = r"\b" + re.escape(normalized_tool) + r"\b"
-        if re.search(pattern, normalized_query):
-            detected.append(tool_name)
-    return detected
+def canonicalize_tool_names(proposed_steps, knowledge_base):
+    """Map tool-name variants in an LLM workflow proposal to canonical HP2Net names.
+    Input:
+        proposed_steps (list[str]): Tool names proposed by the LLM.
+        knowledge_base (dict): HP2Net knowledge base containing canonical tool names.
+    Output:
+        list[str]: Workflow steps using canonical HP2Net tool names.
+    """
+    canonical_tools = knowledge_base.get("tools", {})
+    canonical_by_normalized_name = {
+        normalize_string(tool_name): tool_name
+        for tool_name in canonical_tools
+    }
+    canonical_steps = []
+    for proposed_tool in proposed_steps:
+        normalized_tool = normalize_string(proposed_tool)
+        if normalized_tool in canonical_by_normalized_name:
+            canonical_steps.append(canonical_by_normalized_name[normalized_tool])
+        else:
+            canonical_steps.append(proposed_tool)
+    return canonical_steps
 
-def select_knowledge(query, knowledge):
-    detected_tools = detect_tools(query, knowledge)
+def identify_mentioned_tools(user_query, knowledge_base):
+    """Identify HP2Net tools explicitly mentioned in a user query.
+    Input:
+        user_query (str): Natural language workflow request.
+        knowledge_base (dict): HP2Net knowledge base containing tool definitions.
+    Output:
+        list[str]: Tool names detected in the query, using the canonical
+        names defined in the knowledge base.
+    """
+    normalized_query = normalize_string(user_query)
+    detected_tool_names = []
+    for tool_name in knowledge_base["tools"]:
+        normalized_tool_name = normalize_string(tool_name)
+        regex_pattern = r"\b" + re.escape(normalized_tool_name) + r"\b"
+        if re.search(regex_pattern, normalized_query):
+            detected_tool_names.append(tool_name)
+    return detected_tool_names
+
+def filter_relevant_knowledge(user_query, knowledge_base):
+    """Extract knowledge relevant to the tools mentioned in a user query.
+    Input:
+        user_query (str): Natural language workflow request.
+        knowledge_base (dict): HP2Net knowledge base.
+    Output:
+        dict: Filtered knowledge containing relevant tools and workflows.
+    """
+    detected_tools = identify_mentioned_tools(user_query, knowledge_base)
     selected_tools = {
-        tool: knowledge["tools"][tool]
+        tool: knowledge_base["tools"][tool]
         for tool in detected_tools
-        if tool in knowledge["tools"]
+        if tool in knowledge_base["tools"]
     }
     selected_workflows = {}
-    workflows = knowledge.get("workflows", {})
-    for workflow_name, workflow in workflows.items():
-        workflow_steps = workflow.get("steps", [])
-        if any(tool in detected_tools for tool in workflow_steps):
-            selected_workflows[workflow_name] = workflow
+    available_workflows = knowledge_base.get("workflows", {})
+    for workflow_name, workflow_data in available_workflows.items():
+        execution_steps = workflow_data.get("steps", [])
+        if any(tool in detected_tools for tool in execution_steps):
+            selected_workflows[workflow_name] = workflow_data
     return {
         "tools": selected_tools,
         "workflows": selected_workflows
     }
 
-def build_context(selected_knowledge):
-    context_parts = []
-    tools = selected_knowledge["tools"]
-    workflows = selected_knowledge["workflows"]
-    if tools:
-        context_parts.append("AVAILABLE TOOLS:")
-        for name, tool in tools.items():
-            line = f"- {name}: {tool.get('role', '')}"
-            if "method" in tool:
-                line += f"; method={tool['method']}"
-            context_parts.append(line)
-    if workflows:
-        if context_parts:
-            context_parts.append("")
-        context_parts.append("RELEVANT IMPLEMENTED WORKFLOWS:")
-        context_parts.append(
+def format_knowledge_context(filtered_knowledge):
+    """Format filtered knowledge for inclusion in the LLM prompt.
+    Input:
+        filtered_knowledge (dict): Relevant tools and workflows extracted from the HP2Net knowledge base.
+    Output:
+        str: Human-readable knowledge context for LLM prompt construction.
+    """
+    formatted_sections = []
+    tools_subset = filtered_knowledge["tools"]
+    workflows_subset = filtered_knowledge["workflows"]
+    if tools_subset:
+        formatted_sections.append("AVAILABLE TOOLS:")
+        for tool_name, tool_metadata in tools_subset.items():
+            entry_line = f"- {tool_name}: {tool_metadata.get('role', '')}"
+            if "method" in tool_metadata:
+                entry_line += f"; method={tool_metadata['method']}"
+            formatted_sections.append(entry_line)
+    if workflows_subset:
+        if formatted_sections:
+            formatted_sections.append("")
+        formatted_sections.append("RELEVANT IMPLEMENTED WORKFLOWS:")
+        formatted_sections.append(
             "The following workflow sequences are complete operational sequences. "
             "When a user's request matches the beginning and end of one of these "
             "workflows, include all intermediate tools."
         )
-        for name, workflow in workflows.items():
-            steps = " -> ".join(workflow.get("steps", []))
-            context_parts.append(f"- {name}: {steps}")
-            if workflow.get("description"):
-                context_parts.append(f"  {workflow['description']}")
-    return "\n".join(context_parts)
+        for workflow_name, workflow_metadata in workflows_subset.items():
+            step_chain = " -> ".join(workflow_metadata.get("steps", []))
+            formatted_sections.append(f"- {workflow_name}: {step_chain}")
+            if workflow_metadata.get("description"):
+                formatted_sections.append(f"  {workflow_metadata['description']}")
+    return "\n".join(formatted_sections)
 
-def build_prompt(user_query, selected_knowledge):
-    context = build_context(selected_knowledge)
+def compose_llm_prompt(user_query, filtered_knowledge):
+    """Construct the complete prompt sent to the workflow planning LLM.
+    Input:
+        user_query (str): Natural language workflow request.
+        filtered_knowledge (dict): Relevant HP2Net knowledge.
+    Output:
+        str: Formatted prompt for LLM submission.
+    """
+    context_text = format_knowledge_context(filtered_knowledge)
     return f"""
 User request:
 {user_query}
 
-{context}
+{context_text}
 
 Determine the steps (tools) required for this request and return ONLY the JSON object.
 """
 
-def call_ollama(user_prompt):
-    payload = {
-        "model": MODEL,
-        "prompt": f"{SYSTEM_PROMPT}\n\nUSER REQUEST:\n{user_prompt}",
+def query_ollama_model(constructed_prompt):
+    """Send a workflow planning request to the local Ollama model.
+    Input:
+        constructed_prompt (str): Complete prompt for the LLM.
+    Output:
+        str: Raw response generated by the LLM.
+    Raises:
+        requests.RequestException: If communication with the Ollama API fails or returns an HTTP error.
+    """
+    request_payload = {
+        "model": MODEL_NAME,
+        "prompt": f"{SYSTEM_PROMPT}\n\nUSER REQUEST:\n{constructed_prompt}",
         "stream": False,
         "format": "json",
         "options": {
@@ -231,137 +282,149 @@ def call_ollama(user_prompt):
             "num_predict": 512
         }
     }
-    start = time.time()
-    response = requests.post(OLLAMA_URL, json=payload, timeout=300)
-    response.raise_for_status()
-    data = response.json()
-    print(f"\nOllama generation time: {time.time() - start:.1f} s")
-    return data.get("response", "")
+    execution_start_time = time.time()
+    api_response = requests.post(OLLAMA_API_ENDPOINT, json=request_payload, timeout=300)
+    api_response.raise_for_status()
+    response_data = api_response.json()
+    print(f"\nOllama generation time: {time.time() - execution_start_time:.1f} s")
+    return response_data.get("response", "")
 
-def parse_response(response_text):
-    if not response_text or not response_text.strip():
-        raise RuntimeError("LLM returned an empty response.")
-    if "</think>" in response_text:
-        response_text = response_text.split("</think>")[-1].strip()
-    match = re.search(r"\{.*\}", response_text, re.DOTALL)
-    if not match:
-        raise RuntimeError(f"No JSON object found in response:\n{response_text}")
-    json_str = match.group(0)
-    try:
-        raw_json = json.loads(json_str)
-        return raw_json
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Failed to parse JSON: {e}\nString: {json_str}")
+def parse_llm_json_response(raw_response_text):
+    """Extract and parse the JSON workflow plan returned by the LLM.
+    Input:
+        raw_response_text (str): Raw LLM response containing a JSON object.
+    Output:
+        dict: Parsed JSON workflow plan.
+    Raises:
+        ValueError: If the response is empty or does not contain a valid JSON object.
+        json.JSONDecodeError: If the extracted text is malformed JSON.
+    """
+    if not raw_response_text or not raw_response_text.strip():
+        raise ValueError("LLM returned an empty response.")
+    if "</think>" in raw_response_text:
+        raw_response_text = raw_response_text.split("</think>")[-1].strip()
+    regex_match = re.search(r"\{.*\}", raw_response_text, re.DOTALL)
+    if not regex_match:
+        raise ValueError(f"No JSON object found in response:\n{raw_response_text}")
+    extracted_json_string = regex_match.group(0)
+    return json.loads(extracted_json_string)
 
-def validate_interfaces(steps, knowledge):
+def check_interface_compatibility(proposed_steps, knowledge_base):
+    """Check whether consecutive workflow tools have supported interfaces, validanting consecutive workflow steps against known interfaces.
+    Input:
+        proposed_steps (list[str]): Ordered sequence of proposed tool names.
+        knowledge_base (dict): HP2Net knowledge base containing interface definitions.
+    Output:
+        tuple[bool, str|None]: A validation flag and an optional explanation of the first incompatible interface.
     """
-    Validate consecutive workflow steps against known interfaces.
-    """
-    interfaces = knowledge.get("interfaces", [])
-    for producer, consumer in zip(steps, steps[1:]):
-        matching = [
+    available_interfaces = knowledge_base.get("interfaces", [])
+    for producer_tool, consumer_tool in zip(proposed_steps, proposed_steps[1:]):
+        producer_norm = normalize_string(producer_tool)
+        consumer_norm = normalize_string(consumer_tool)
+        matching_interfaces = [
             interface
-            for interface in interfaces
-            if interface["producer"] == producer and interface["consumer"] == consumer
+            for interface in available_interfaces
+            if normalize_string(interface["producer"]) == producer_norm
+            and normalize_string(interface["consumer"]) == consumer_norm
         ]
-        if not matching:
-            return False, f"No interface found for {producer} -> {consumer}."
-        if not matching[0].get("supported", False):
-            return False, matching[0].get(
+        if not matching_interfaces:
+            return False, f"No interface found for {producer_tool} -> {consumer_tool}."
+        if not matching_interfaces[0].get("supported", False):
+            return False, matching_interfaces[0].get(
                 "reason",
-                f"{producer} -> {consumer} is unsupported."
+                f"{producer_tool} -> {consumer_tool} is unsupported."
             )
     return True, None
 
-def validate_composition(steps, knowledge):
+def evaluate_workflow_composition(proposed_steps, knowledge_base):
+    """Evaluate a proposed workflow against HP2Net capabilities. The evaluation checks tool validity, interfaces, implemented workflows, supported compositions, and valid subsequences of implemented workflows.
+    Input:
+        proposed_steps (list[str]): Ordered sequence of proposed tools.
+        knowledge_base (dict): HP2Net knowledge base.
+    Output:
+        dict: Evaluation result containing workflow status, execution status, and implementation notes.
     """
-    Validate a proposed workflow against implemented workflows, supported compositions, and interface capabilities.
-    """
-    requested_steps = list(steps)
-    valid_interfaces, interface_reason = validate_interfaces(
-        steps,
-        knowledge
-    )
-    for workflow_name, workflow in knowledge.get("workflows", {}).items():
-        workflow_steps = workflow.get("steps", [])
-        if requested_steps == workflow_steps:
-            implemented = (
-                workflow.get("implemented", False)
-                and valid_interfaces
-            )
-            notes = []
-            if implemented:
-                notes.append(
-                    f"Implemented as part of {workflow_name}."
-                )
-            if not valid_interfaces and interface_reason:
-                notes.append(interface_reason)
+    requested_step_sequence = list(proposed_steps)
+    known_tool_registry = set(knowledge_base.get("tools", {}).keys())
+    unrecognized_tools = [tool for tool in requested_step_sequence if tool not in known_tool_registry]
+    if unrecognized_tools:
+        return {
+            "status": "invalid_workflow",
+            "execution_status": "unsupported",
+            "implementation_notes": [
+                f"Unknown tool(s): {', '.join(unrecognized_tools)}."
+            ]
+        }
+    has_valid_interfaces, interface_error_reason = check_interface_compatibility(proposed_steps, knowledge_base)
+    for workflow_name, workflow_metadata in knowledge_base.get("workflows", {}).items():
+        defined_workflow_steps = workflow_metadata.get("steps", [])
+        if requested_step_sequence == defined_workflow_steps:
+            is_implemented = workflow_metadata.get("implemented", False) and has_valid_interfaces
+            validation_notes = []
+            if is_implemented:
+                validation_notes.append(f"Implemented as part of {workflow_name}.")
+            if not has_valid_interfaces and interface_error_reason:
+                validation_notes.append(interface_error_reason)
             return {
                 "status": "existing_workflow",
-                "execution_status": (
-                    "implemented"
-                    if implemented
-                    else "uncertain"
-                ),
-                "implementation_notes": notes
+                "execution_status": "implemented" if is_implemented else "uncertain",
+                "implementation_notes": validation_notes
             }
-    for composition in knowledge.get("supported_compositions", []):
-        supported_steps = composition.get("steps", [])
-        if requested_steps == supported_steps:
-            implemented = (
-                composition.get("implemented", False)
-                and valid_interfaces
-            )
-            notes = []
-            part_of = composition.get("implemented_as_part_of")
-            if part_of:
-                notes.append(
-                    f"Implemented as part of {part_of}."
-                )
-            if not valid_interfaces and interface_reason:
-                notes.append(interface_reason)
+    for composition_metadata in knowledge_base.get("supported_compositions", []):
+        supported_step_sequence = composition_metadata.get("steps", [])
+        if requested_step_sequence == supported_step_sequence:
+            is_implemented = composition_metadata.get("implemented", False) and has_valid_interfaces
+            validation_notes = []
+            parent_workflow = composition_metadata.get("implemented_as_part_of")
+            if parent_workflow:
+                validation_notes.append(f"Implemented as part of {parent_workflow}.")
+            if not has_valid_interfaces and interface_error_reason:
+                validation_notes.append(interface_error_reason)
             return {
                 "status": "existing_composition",
-                "execution_status": (
-                    "implemented"
-                    if implemented
-                    else "uncertain"
-                ),
-                "implementation_notes": notes
+                "execution_status": "implemented" if is_implemented else "uncertain",
+                "implementation_notes": validation_notes
             }
-    for workflow_name, workflow in knowledge.get("workflows", {}).items():
-        workflow_steps = workflow.get("steps", [])
-        for i in range(len(workflow_steps) - len(requested_steps) + 1):
-            if workflow_steps[i:i + len(requested_steps)] == requested_steps:
-                implemented = (
-                    workflow.get("implemented", False)
-                    and valid_interfaces
-                )
-                notes = [
-                    f"Implemented as part of {workflow_name}."
-                ]
-                if not valid_interfaces and interface_reason:
-                    notes.append(interface_reason)
+    for workflow_name, workflow_metadata in knowledge_base.get("workflows", {}).items():
+        defined_workflow_steps = workflow_metadata.get("steps", [])
+        for offset in range(len(defined_workflow_steps) - len(requested_step_sequence) + 1):
+            if defined_workflow_steps[offset:offset + len(requested_step_sequence)] == requested_step_sequence:
+                is_implemented = workflow_metadata.get("implemented", False) and has_valid_interfaces
+                validation_notes = [f"Implemented as part of {workflow_name}."]
+                if not has_valid_interfaces and interface_error_reason:
+                    validation_notes.append(interface_error_reason)
                 return {
                     "status": "existing_composition",
-                    "execution_status": (
-                        "implemented"
-                        if implemented
-                        else "uncertain"
-                    ),
-                    "implementation_notes": notes
+                    "execution_status": "implemented" if is_implemented else "uncertain",
+                    "implementation_notes": validation_notes
                 }
-    notes = []
-    if interface_reason:
-        notes.append(interface_reason)
+    if has_valid_interfaces:
+        return {
+            "status": "new_supported_workflow",
+            "execution_status": "not_implemented",
+            "implementation_notes": [
+                "Valid and supported tool sequence, but not yet implemented in parsl_workflow.py."
+            ]
+        }
+    validation_notes = []
+    if interface_error_reason:
+        validation_notes.append(interface_error_reason)
     return {
-        "status": "new_workflow",
-        "execution_status": "uncertain",
-        "implementation_notes": notes
+        "status": "unsupported_composition",
+        "execution_status": "unsupported",
+        "implementation_notes": validation_notes
     }
 
-def validate_plan(plan):
-    required_keys = {
+def verify_plan_structure(plan_dictionary):
+    """Validate the structure and data types of a final workflow plan.
+    Input:
+        plan_dictionary (dict): Final workflow plan to validate.
+    Output:
+        None.
+    Raises:
+        ValueError: If required fields are missing, unexpected fields are present, or the steps field is invalid.
+    """
+    mandatory_keys = {
         "status",
         "execution_status",
         "goal",
@@ -369,13 +432,13 @@ def validate_plan(plan):
         "steps",
         "implementation_notes"
     }
-    missing = required_keys - set(plan.keys())
-    if missing:
-        raise ValueError(f"Missing required fields: {sorted(missing)}")
-    extra = set(plan.keys()) - required_keys
-    if extra:
-        raise ValueError(f"Unexpected fields: {sorted(extra)}")
-    if not isinstance(plan["steps"], list) or not plan["steps"]:
+    missing_keys = mandatory_keys - set(plan_dictionary.keys())
+    if missing_keys:
+        raise ValueError(f"Missing required fields: {sorted(missing_keys)}")
+    unexpected_keys = set(plan_dictionary.keys()) - mandatory_keys
+    if unexpected_keys:
+        raise ValueError(f"Unexpected fields: {sorted(unexpected_keys)}")
+    if not isinstance(plan_dictionary["steps"], list) or not plan_dictionary["steps"]:
         raise ValueError("'steps' must be a non-empty list.")
 
 def main():
@@ -383,30 +446,31 @@ def main():
     if not user_query:
         raise ValueError("The workflow request cannot be empty.")
     print("\nLoading HP2Net knowledge...")
-    knowledge = load_knowledge()
-    selected_knowledge = select_knowledge(user_query, knowledge)
-    prompt = build_prompt(user_query, selected_knowledge)
+    knowledge_base = read_knowledge_base()
+    filtered_knowledge = filter_relevant_knowledge(user_query, knowledge_base)
+    constructed_prompt = compose_llm_prompt(user_query, filtered_knowledge)
     print("\nQuerying LLM for step proposal...")
-    raw_response = call_ollama(prompt)
-    llm_output = parse_response(raw_response)
-    steps = llm_output.get("steps", [])
-    goal = llm_output.get("goal", "Construct requested workflow")
-    workflow_name = "-".join(steps) if steps else "Unnamed-Workflow"
+    raw_llm_output = query_ollama_model(constructed_prompt)
+    parsed_llm_output = parse_llm_json_response(raw_llm_output)
+    proposed_steps = parsed_llm_output.get("steps", [])
+    proposed_steps = canonicalize_tool_names(proposed_steps, knowledge_base)
+    workflow_goal = parsed_llm_output.get("goal", "Construct requested workflow")
+    workflow_identifier = "-".join(proposed_steps) if proposed_steps else "Unnamed-Workflow"
     print("\nValidating proposed steps via Python logic...")
-    validation = validate_composition(steps, knowledge)
-    plan = {
-        "status": validation["status"],
-        "execution_status": validation["execution_status"],
-        "goal": goal,
-        "workflow_name": workflow_name,
-        "steps": steps,
-        "implementation_notes": validation["implementation_notes"]
+    composition_evaluation = evaluate_workflow_composition(proposed_steps, knowledge_base)
+    final_plan = {
+        "status": composition_evaluation["status"],
+        "execution_status": composition_evaluation["execution_status"],
+        "goal": workflow_goal,
+        "workflow_name": workflow_identifier,
+        "steps": proposed_steps,
+        "implementation_notes": composition_evaluation["implementation_notes"]
     }
-    validate_plan(plan)
+    verify_plan_structure(final_plan)
     print("\n" + "=" * 70)
     print("FINAL VALIDATED WORKFLOW PLAN")
     print("=" * 70)
-    print(json.dumps(plan, indent=2, ensure_ascii=False))
+    print(json.dumps(final_plan, indent=2, ensure_ascii=False))
 
 if __name__ == "__main__":
     main()
