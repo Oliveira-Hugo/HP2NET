@@ -10,6 +10,7 @@ import os
 import re
 import requests
 import warnings
+from collections import deque
 
 warnings.filterwarnings("ignore", category=SyntaxWarning)
 
@@ -29,9 +30,146 @@ IMPLEMENTATION_SPEC = {
         "Do not invent external APIs.",
         "Do not invent HP2Net APIs.",
         "Do not invent modules, classes, decorators or functions.",
-        "Implement strictly the validated tool sequence.",
-        "Do not add tools before, after, or between the validated steps."
+        "Implement strictly the validated tool sequence and its required HP2Net implementation pattern.",
+        "Do not add tools before, after, or between the validated steps unless required by the implementation pattern.",
+        "Ensure function calls respect the exact signature contracts (required arguments and input types) defined in apps.py.",
+        "Do not invent configuration attributes or file paths. Use only configuration fields present in bioconfig.py and filesystem paths established by the implementation pattern.",
+        "Do not emit optional arguments merely because they exist in the app signature. Emit an argument only when the implementation pattern requires it or when the original HP2Net workflow uses it."
     ]
+}
+
+IMPLEMENTATION_PATTERNS = {
+    ("BUCKy", "Quartet MaxCut"): {
+        "apps": [
+            "setup_bucky_data",
+            "bucky",
+            "setup_bucky_output",
+            "setup_qmc_data",
+            "quartet_maxcut",
+            "setup_qmc_output"
+        ],
+        "multiplicity": {
+            "setup_bucky_data": "once",
+            "bucky": "once_per_prune_file",
+            "setup_bucky_output": "once_after_bucky",
+            "setup_qmc_data": "once_after_bucky_output",
+            "quartet_maxcut": "once",
+            "setup_qmc_output": "once_after_quartet_maxcut"
+        },
+        "description": (
+            "1. Execute apps.setup_bucky_data(basedir, config, inputs=prepare_to_run)\n"
+            "2. Wait for setup_bucky_data using wait_for_all([ret_pre_bucky])\n"
+            "3. Discover prune trees using glob.glob(os.path.join(basedir['dir'], 'bucky', '*.txt'))\n"
+            "4. Execute apps.bucky once per prune file in a loop passing prune_file=prune_tree and inputs=[ret_pre_bucky]\n"
+            "5. Execute apps.setup_bucky_output(basedir, config, inputs=ret_bucky)\n"
+            "6. Execute apps.setup_qmc_data(basedir, config, inputs=[ret_post_bucky])\n"
+            "7. Execute apps.quartet_maxcut(basedir, config, inputs=[ret_pre_qmc])\n"
+            "8. Execute apps.setup_qmc_output(basedir, config, inputs=[ret_qmc]) to obtain ret_post_qmc\n"
+            "9. Iterate over config.snaq_hmax\n"
+            "10. For each h value, execute apps.snaq(basedir=basedir, config=config, hmax=h, inputs=[ret_post_qmc])\n"
+            "11. Return the list of SNaQ results"
+        )
+    },
+    ("BUCKy", "Quartet MaxCut", "SNaQ"): {
+        "apps": [
+            "setup_bucky_data",
+            "bucky",
+            "setup_bucky_output",
+            "setup_qmc_data",
+            "quartet_maxcut",
+            "setup_qmc_output",
+            "snaq"
+        ],
+        "multiplicity": {
+            "setup_bucky_data": "once",
+            "bucky": "once_per_prune_file",
+            "setup_bucky_output": "once_after_bucky",
+            "setup_qmc_data": "once_after_bucky_output",
+            "quartet_maxcut": "once",
+            "setup_qmc_output": "once_after_quartet_maxcut",
+            "snaq": "loop_hmax"
+        },
+        "description": (
+            "1. Execute apps.setup_bucky_data(basedir, config, inputs=prepare_to_run)\n"
+            "2. Wait for setup_bucky_data using wait_for_all([ret_pre_bucky])\n"
+            "3. Discover prune trees using glob.glob(os.path.join(basedir['dir'], 'bucky', '*.txt'))\n"
+            "4. Execute apps.bucky once per prune file in a loop passing prune_file=prune_tree and inputs=[ret_pre_bucky]\n"
+            "5. Execute apps.setup_bucky_output(basedir, config, inputs=ret_bucky)\n"
+            "6. Execute apps.setup_qmc_data(basedir, config, inputs=[ret_post_bucky])\n"
+            "7. Execute apps.quartet_maxcut(basedir, config, inputs=[ret_pre_qmc])\n"
+            "8. Execute apps.setup_qmc_output(basedir, config, inputs=[ret_qmc]) to obtain ret_post_qmc\n"
+            "9. Iterate over config.snaq_hmax\n"
+            "10. For each h value, execute apps.snaq(basedir=basedir, config=config, hmax=h, inputs=[ret_post_qmc])\n"
+            "11. Return the list of SNaQ results"
+        )
+    },
+    ("RAxML", "ASTRAL"): {
+        "apps": [
+            "raxml",
+            "setup_tree_output",
+            "astral"
+        ],
+        "multiplicity": {
+            "raxml": "once_per_gene",
+            "setup_tree_output": "once_after_raxml",
+            "astral": "once"
+        },
+        "description": (
+            "1. Discover gene alignments using datalist = glob.glob(os.path.join(basedir['dir'], 'input', 'phylip', '*.phy'))\n"
+            "2. Initialize ret_tree = []\n"
+            "3. For each input_file in datalist, execute apps.raxml(basedir=basedir, config=config, inputs=prepare_to_run, input_file=input_file) and append the result to ret_tree\n"
+            "4. Execute apps.setup_tree_output(basedir=basedir, config=config, inputs=ret_tree) to obtain ret_sad\n"
+            "5. Execute apps.astral(basedir=basedir, config=config, inputs=[ret_sad])\n"
+            "6. Return the result of apps.astral"
+        )
+    },
+    ("MrBayes", "MBSUM"): {
+        "apps": [
+            "mrbayes",
+            "mbsum"
+        ],
+        "multiplicity": {
+            "mrbayes": "once_per_gene",
+            "mbsum": "once_per_gene"
+        },
+        "description": (
+            "1. Discover input nexus alignments using datalist = glob.glob(os.path.join(basedir['dir'], 'input', 'nexus', '*.nex'))\n"
+            "2. Initialize ret_mbsum = []\n"
+            "3. For each input_file in datalist, execute apps.mrbayes(basedir=basedir, config=config, input_file=input_file, inputs=prepare_to_run)\n"
+            "4. For the same input_file, execute apps.mbsum(basedir=basedir, config=config, input_file=input_file, inputs=[ret_mb])\n"
+            "5. Append each MBSUM result to ret_mbsum\n"
+            "6. Return ret_mbsum"
+        )
+    },
+    ("RAxML", "root_tree", "PhyloNet"): {
+        "apps": [
+            "raxml",
+            "setup_tree_output",
+            "root_tree",
+            "setup_phylonet_data",
+            "phylonet"
+        ],
+        "multiplicity": {
+            "raxml": "once_per_gene",
+            "setup_tree_output": "once_after_raxml",
+            "root_tree": "once",
+            "setup_phylonet_data": "once_per_hmax",
+            "phylonet": "once_per_hmax"
+        },
+        "description": (
+            "1. Discover gene alignments using datalist = glob.glob(os.path.join(basedir['dir'], 'input', 'phylip', '*.phy'))\n"
+            "2. Initialize ret_tree = []\n"
+            "3. For each input_file in datalist, execute apps.raxml(basedir=basedir, config=config, inputs=prepare_to_run, input_file=input_file) and append the result to ret_tree\n"
+            "4. Execute apps.setup_tree_output(basedir=basedir, config=config, inputs=ret_tree) to obtain ret_sad\n"
+            "5. Execute apps.root_tree(basedir=basedir, config=config, inputs=[ret_sad]) to obtain ret_rooted\n"
+            "6. Compute out_dir = os.path.join(basedir['dir'], config.phylonet_dir)\n"
+            "7. For each h in config.phylonet_hmax, execute apps.setup_phylonet_data(basedir=basedir, config=config, hmax=h, inputs=[ret_rooted]) and store the result as ret_spd\n"
+            "8. For the same h, construct filename = os.path.join(out_dir, basedir['tree_method'] + '_' + h + '_' + config.phylonet_input)\n"
+            "9. For the same h, execute apps.phylonet(basedir=basedir, config=config, input_file=filename, inputs=[ret_spd])\n"
+            "10. Append each PhyloNet result to result\n"
+            "11. Return result"
+        )
+    }
 }
 
 def read_json_file(file_path):
@@ -88,7 +226,12 @@ def extract_app_signatures(file_path="apps.py"):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             decorators = [f"@{ast.unparse(decorator)}" for decorator in node.decorator_list]
             decorator_prefix = "\n".join(decorators) + "\n" if decorators else ""
-            argument_names = [arg.arg for arg in node.args.args]
+            argument_names = []
+            for arg in node.args.args:
+                arg_str = arg.arg
+                if arg.annotation:
+                    arg_str += f": {ast.unparse(arg.annotation)}"
+                argument_names.append(arg_str)
             function_signature = f"{decorator_prefix}def {node.name}({', '.join(argument_names)}):"
             function_docstring = ast.get_docstring(node)
             if function_docstring:
@@ -171,6 +314,60 @@ def extract_requested_tools(user_prompt, knowledge):
             dedup_tools.append(tool)
     return dedup_tools
 
+def build_interface_graph(knowledge):
+    graph = {}
+    tools = knowledge.get("tools", {})
+    for tool in tools:
+        graph[tool] = []
+    interfaces = knowledge.get("interfaces", [])
+    for iface in interfaces:
+        if iface.get("supported", False):
+            producer = iface.get("producer")
+            consumer = iface.get("consumer")
+            if producer in graph:
+                graph[producer].append(consumer)
+            else:
+                graph[producer] = [consumer]
+    return graph
+
+def find_path(graph, start, end):
+    if start not in graph or end not in graph:
+        return None
+    if start == end:
+        return [start]
+    queue = deque([[start]])
+    visited = {start}
+    while queue:
+        path = queue.popleft()
+        node = path[-1]
+        for neighbor in graph.get(node, []):
+            if neighbor == end:
+                return path + [neighbor]
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append(path + [neighbor])
+    return None
+
+def resolve_workflow_path(requested_tools, knowledge):
+    if not requested_tools:
+        return []
+    if len(requested_tools) == 1:
+        return requested_tools
+    graph = build_interface_graph(knowledge)
+    resolved_path = [requested_tools[0]]
+    for i in range(len(requested_tools) - 1):
+        start_tool = requested_tools[i]
+        end_tool = requested_tools[i + 1]
+        sub_path = find_path(graph, start_tool, end_tool)
+        if not sub_path:
+            return None
+        resolved_path.extend(sub_path[1:])
+    return resolved_path
+
+def resolve_implementation_pattern(steps):
+    tuple_steps = tuple(steps)
+    return IMPLEMENTATION_PATTERNS.get(tuple_steps)
+
 def validate_endpoints(steps, requested_tools):
     """Validate preservation of the requested workflow endpoints (starting and ending tools).
     Input:
@@ -218,110 +415,208 @@ def validate_interfaces(steps, knowledge):
     return True, None
 
 def validate_composition(steps, knowledge):
-    """Validate a proposed workflow against known workflows, compositions, and tools.
-    Input:
-        steps (list[str]): Proposed ordered tool sequence.
-        knowledge (dict): Target knowledge base used for validation.
-    Output:
-        dict: Workflow classification containing status, execution status, and implementation notes.
-    """
     requested_steps = list(steps)
     known_tools = set(knowledge.get("tools", {}).keys())
     unknown_tools = [tool for tool in requested_steps if tool not in known_tools]
     if unknown_tools:
         return {
-            "status": "invalid_workflow", 
-            "execution_status": "unsupported", 
+            "status": "invalid_workflow",
+            "execution_status": "unsupported",
             "implementation_notes": [f"Unknown tool(s): {', '.join(unknown_tools)}."]
         }
     valid_interfaces, interface_reason = validate_interfaces(requested_steps, knowledge)
-    for workflow_name, workflow in knowledge.get("workflows", {}).items():
-        if requested_steps == workflow.get("steps", []):
-            implemented = workflow.get("implemented", False) and valid_interfaces
-            notes = []
-            if implemented:
-                notes.append(f"Implemented as part of {workflow_name}.")
-            if not valid_interfaces and interface_reason:
-                notes.append(interface_reason)
-            return {
-                "status": "existing_workflow", 
-                "execution_status": "implemented" if implemented else "uncertain", 
-                "implementation_notes": notes
-            }
-    for composition in knowledge.get("supported_compositions", []):
-        if requested_steps == composition.get("steps", []):
-            implemented = composition.get("implemented", False) and valid_interfaces
-            notes = []
-            part_of = composition.get("implemented_as_part_of")
-            if part_of:
-                notes.append(f"Implemented as part of {part_of}.")
-            if not valid_interfaces and interface_reason:
-                notes.append(interface_reason)
-            return {
-                "status": "existing_composition", 
-                "execution_status": "implemented" if implemented else "uncertain", 
-                "implementation_notes": notes
-            }
-    if valid_interfaces:
+    if not valid_interfaces:
         return {
-            "status": "new_supported_workflow", 
-            "execution_status": "not_implemented", 
-            "implementation_notes": ["Valid and supported tool sequence in target KB."]
+            "status": "unsupported_composition",
+            "execution_status": "unsupported",
+            "implementation_notes": [interface_reason] if interface_reason else []
         }
-    notes = [interface_reason] if interface_reason else []
+    workflows = knowledge.get("workflows", {})
+    if isinstance(workflows, dict):
+        for workflow_name, workflow in workflows.items():
+            if isinstance(workflow, dict):
+                workflow_steps = workflow.get("steps", [])
+                wf_status = workflow.get("status", workflow.get("execution_status", "implemented"))
+                is_implemented = (wf_status == "implemented") or workflow.get("implemented", False)
+            elif isinstance(workflow, list):
+                workflow_steps = workflow
+                is_implemented = True
+            else:
+                continue
+            if requested_steps == workflow_steps:
+                if is_implemented:
+                    return {
+                        "status": "existing_workflow",
+                        "execution_status": "implemented",
+                        "implementation_notes": [f"Implemented as part of {workflow_name}."]
+                    }
     return {
-        "status": "unsupported_composition", 
-        "execution_status": "unsupported", 
-        "implementation_notes": notes
+        "status": "new_supported_workflow",
+        "execution_status": "not_implemented",
+        "implementation_notes": ["Valid and supported path in target KB graph."]
     }
 
-def validate_generated_code(code_str, expected_steps, apps_file="apps.py"):
-    """Validate generated Python code syntactically and semantically.
-    Input:
-        code_str (str): Python source code generated by Agent 2.
-        expected_steps (list[str]): Validated HP2Net tool sequence that the generated code must implement.
-        apps_file (str): Path to the Parsl apps module.
-    Output:
-        tuple[bool, dict, str]: Overall validation status, individual check results, and an error message when applicable.
-    """
+ALLOWED_WORKFLOW_GLOBALS = {
+    "apps",
+    "glob",
+    "os",
+    "wait_for_all",
+    "BioConfig",
+    "dict",
+    "list",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "set",
+    "tuple",
+    "parsl",
+    "print",
+    "len"
+}
+
+def validate_workflow_names(tree):
+    function_nodes = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    ]
+    if not function_nodes:
+        return False, "No workflow function found."
+    function = function_nodes[0]
+    allowed_names = set(ALLOWED_WORKFLOW_GLOBALS)
+    for arg in function.args.args:
+        allowed_names.add(arg.arg)
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            allowed_names.add(node.id)
+        elif isinstance(node, ast.For):
+            if isinstance(node.target, ast.Name):
+                allowed_names.add(node.target.id)
+            elif isinstance(node.target, ast.Tuple):
+                for elt in node.target.elts:
+                    if isinstance(elt, ast.Name):
+                        allowed_names.add(elt.id)
+    undefined_names = []
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id not in allowed_names:
+                undefined_names.append(node.id)
+    undefined_names = sorted(set(undefined_names))
+    if undefined_names:
+        return False, "Undefined workflow name(s): " + ", ".join(undefined_names)
+    return True, None
+
+def validate_generated_code(code_str, expected_steps, pattern=None, apps_file="apps.py"):
     checks = {
         "AST": "FAILED",
-        "Required tools": "FAILED",
-        "No extra tools": "FAILED",
-        "App symbols": "FAILED"
+        "Required apps": "FAILED",
+        "No extra apps": "FAILED",
+        "App symbols": "FAILED",
+        "Signature arguments": "FAILED",
+        "Implementation pattern": "FAILED",
+        "Workflow names": "FAILED"
     }
     try:
         tree = ast.parse(code_str)
         checks["AST"] = "PASSED"
     except SyntaxError as e:
         return False, checks, f"SyntaxError: {e}"
-    expected_app_calls = [step.lower().replace(" ", "_").replace("-", "_") for step in expected_steps]
+    names_ok, names_reason = validate_workflow_names(tree)
+    if names_ok:
+        checks["Workflow names"] = "PASSED"
+    if pattern:
+        expected_app_calls = [app.lower() for app in pattern["apps"]]
+    else:
+        expected_app_calls = [step.lower().replace(" ", "_").replace("-", "_") for step in expected_steps]
     called_apps = set()
+    app_calls_ast = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
                 if node.func.value.id == "apps":
                     called_apps.add(node.func.attr)
+                    app_calls_ast.append(node)
     missing_tools = [tool for tool in expected_app_calls if tool not in called_apps]
     if not missing_tools:
-        checks["Required tools"] = "PASSED"
+        checks["Required apps"] = "PASSED"
     extra_tools = [tool for tool in called_apps if tool not in expected_app_calls]
     if not extra_tools:
-        checks["No extra tools"] = "PASSED"
+        checks["No extra apps"] = "PASSED"
     existing_apps = extract_available_apps(apps_file)
     non_existent = [tool for tool in called_apps if tool not in existing_apps]
     if not non_existent:
         checks["App symbols"] = "PASSED"
+    signature_errors = []
+    if os.path.exists(apps_file):
+        try:
+            with open(apps_file, "r", encoding="utf-8") as f:
+                apps_tree = ast.parse(f.read(), filename=apps_file)
+            app_func_nodes = {
+                node.name: node for node in ast.walk(apps_tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            for call_node in app_calls_ast:
+                func_name = call_node.func.attr
+                if func_name in app_func_nodes:
+                    target_def = app_func_nodes[func_name]
+                    positional_args = target_def.args.args
+                    defaults_count = len(target_def.args.defaults)
+                    num_required = len(positional_args) - defaults_count
+                    required_arg_names = [arg.arg for arg in positional_args[:num_required]]
+                    passed_keywords = {kw.arg for kw in call_node.keywords if kw.arg is not None}
+                    num_positional_passed = len(call_node.args)
+                    for idx, req_arg in enumerate(required_arg_names):
+                        if idx >= num_positional_passed and req_arg not in passed_keywords:
+                            signature_errors.append(f"Call to 'apps.{func_name}' is missing required argument '{req_arg}'.")
+        except Exception as e:
+            signature_errors.append(f"Failed to inspect app signatures: {e}")
+    if not signature_errors:
+        checks["Signature arguments"] = "PASSED"
+    else:
+        err_details = "; ".join(signature_errors)
+    pattern_errors = []
+    if pattern:
+        for app in pattern["apps"]:
+            if app not in called_apps:
+                pattern_errors.append(f"Missing required pattern app 'apps.{app}'.")
+        multiplicity = pattern.get("multiplicity", {})
+        for app_name, mult in multiplicity.items():
+            if mult in ["once_per_gene", "once_per_prune_file"]:
+                app_in_loop = False
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.For):
+                        for inner_node in ast.walk(node):
+                            if isinstance(inner_node, ast.Call) and isinstance(inner_node.func, ast.Attribute):
+                                if inner_node.func.attr == app_name:
+                                    app_in_loop = True
+                                    break
+                if not app_in_loop:
+                    pattern_errors.append(f"App 'apps.{app_name}' must be executed inside a for-loop iterating over input files.")
+        for app_name, mult in multiplicity.items():
+            if mult in ["once_after_raxml", "once_after_bucky", "once_after_mrbayes"]:
+                setup_call = next((c for c in app_calls_ast if c.func.attr == app_name), None)
+                if setup_call:
+                    inputs_kw = next((kw for kw in setup_call.keywords if kw.arg == "inputs"), None)
+                    if inputs_kw and isinstance(inputs_kw.value, ast.Name):
+                        pass
+                    else:
+                        pattern_errors.append(f"App 'apps.{app_name}' inputs parameter must receive the list accumulator of prior calls.")
+    if not pattern_errors:
+        checks["Implementation pattern"] = "PASSED"
+    else:
+        pattern_details = "; ".join(pattern_errors)
     all_passed = all(status == "PASSED" for status in checks.values())
-    return all_passed, checks, ""
+    error_messages = []
+    if not names_ok:
+        error_messages.append(names_reason)
+    if signature_errors:
+        error_messages.append(err_details)
+    if pattern_errors:
+        error_messages.append(pattern_details)
+    err_msg = "; ".join(error_messages) if error_messages else ""
+    return all_passed, checks, err_msg
 
 def extract_python_code(content: str) -> str:
-    """Extract executable Python code from an LLM response. Strip markdown code blocks and prose comments, keeping pure Python code.
-    Input:
-        content (str): Raw text returned by the LLM.
-    Output:
-        str: Cleaned Python code.
-    """
     if "```python" in content:
         content = content.split("```python")[1].split("```")[0]
     elif "```" in content:
@@ -337,14 +632,6 @@ def extract_python_code(content: str) -> str:
     return "\n".join(code_lines).strip()
 
 def run_agent1_planner(user_prompt, original_knowledge, requested_tools):
-    """Run Agent 1 to generate an ordered HP2Net workflow plan.
-    Input:
-        user_prompt (str): Natural language workflow request.
-        original_knowledge (dict): Original HP2Net knowledge base used by the planner.
-        requested_tools (list[str]): Explicitly requested workflow endpoints.
-    Output:
-        dict: JSON-compatible planning result containing the workflow goal and ordered tool sequence.
-    """
     system_prompt = (
         "You are an expert computational biology workflow planner for HP2Net.\n"
         "Translate the user's request into an ordered sequence of HP2Net tools.\n\n"
@@ -352,7 +639,7 @@ def run_agent1_planner(user_prompt, original_knowledge, requested_tools):
         "HARD CONSTRAINTS:\n"
         "1. Preserve the first and last tools explicitly requested by the user.\n"
         "2. If the requested endpoints are not directly connected, find a valid path between them using the original HP2Net knowledge base.\n"
-        "3. Insert ONLY intermediate tools that are required by a valid interface, supported composition, or implemented workflow in the original KB.\n"
+        "3. Insert ONLY intermediate tools that are required by a valid interface in the original KB graph.\n"
         "4. Do NOT replace either requested endpoint.\n"
         "5. Do NOT add tools before the first requested tool or after the last requested tool.\n"
         "6. If EXPLICITLY REQUESTED TOOLS has only 1 item, output EXACTLY that 1 item.\n"
@@ -384,55 +671,67 @@ def run_agent1_planner(user_prompt, original_knowledge, requested_tools):
         print(f"[AGENT 1 ERROR] Communication or parsing failure: {e}")
         return {"goal": "", "steps": []}
 
-def run_agent2_test_generator(validated_plan, test_knowledge, spec, implementation_context):
-    """Run Agent 2 to generate a Parsl function for a validated workflow.
-    Input:
-        validated_plan (dict): Workflow plan accepted by the Python validator.
-        test_knowledge (dict): Test knowledge base used to constrain the implementation.
-        spec (dict): Implementation rules and framework requirements.
-        implementation_context (str): Available Parsl app contracts extracted from apps.py.
-    Output:
-        str: Generated Python function implementing the validated tool sequence.
-    """
+def run_agent2_test_generator(validated_plan, pattern, spec, implementation_context):
     steps = validated_plan.get("steps", [])
     steps_str = " -> ".join(steps)
     workflow_name = validated_plan.get("workflow_name", "custom_workflow").lower().replace("-", "_")
-
+    pattern_instruction = ""
+    if pattern:
+        pattern_instruction = (
+            f"REQUIRED HP2Net IMPLEMENTATION PATTERN:\n{pattern.get('description', '')}\n\n"
+            f"LIST OF HP2Net APPS TO CALL IN ORDER:\n{json.dumps(pattern.get('apps', []), indent=2)}\n\n"
+            "Do not substitute or bypass this pattern with direct calls between scientific tools."
+        )
     few_shot_example = '''
 FEW-SHOT EXAMPLE OF EXPECTED OUTPUT:
 
-def bucky_quartet_maxcut_snaq(bio_config, basedir, prepare_to_run):
-    max_workers = bio_config.workflow_core * bio_config.workflow_node
-    result = list()
-    
-    # Step 1: BUCKy
-    ret_bucky = apps.bucky(basedir=basedir, config=bio_config, inputs=prepare_to_run)
-    
-    # Step 2: Quartet MaxCut
-    ret_maxcut = apps.quartet_maxcut(basedir=basedir, config=bio_config, inputs=[ret_bucky])
-    
-    # Step 3: SNaQ
-    pool_phylo = CircularList(math.floor(max_workers / int(bio_config.snaq_threads)))
-    for h in bio_config.snaq_hmax:
-        ret_snq = apps.snaq(basedir, config=bio_config, hmax=h, inputs=[ret_maxcut], next_pipe=pool_phylo.next())
-        pool_phylo.current(ret_snq)
-        result.append(ret_snq)
-        
-    return result
-'''
+def raxml_astral(basedir, config, prepare_to_run):
+    datalist = glob.glob(
+        os.path.join(basedir["dir"], "input", "phylip", "*.phy")
+    )
 
+    ret_tree = []
+
+    for input_file in datalist:
+        ret_tree.append(
+            apps.raxml(
+                basedir=basedir,
+                config=config,
+                inputs=prepare_to_run,
+                input_file=input_file
+            )
+        )
+
+    ret_sad = apps.setup_tree_output(
+        basedir=basedir,
+        config=config,
+        inputs=ret_tree
+    )
+
+    ret_ast = apps.astral(
+        basedir=basedir,
+        config=config,
+        inputs=[ret_sad]
+    )
+
+    return ret_ast
+'''
     system_prompt = (
         "You are Agent 2: Test & Code Implementation Agent for HP2Net.\n"
-        "Your task is ONLY to generate the single Python function for the requested steps.\n\n"
+        "Your task is ONLY to generate the single Python function for the requested steps and required implementation pattern.\n\n"
         "CRITICAL INSTRUCTIONS:\n"
         "1. DO NOT output existing functions like raxml_snaq or iqtree_snaq.\n"
-        "2. Implement ONLY the target steps chain.\n"
-        "3. Output ONLY valid executable Python code without markdown blocks or text.\n\n"
+        "2. Implement ONLY the target steps chain and its associated HP2Net implementation pattern.\n"
+        "3. Output ONLY valid executable Python code without markdown blocks or text.\n"
+        "4. Pay strict attention to required positional and keyword parameters in AVAILABLE APPS CONTRACTS.\n"
+        "5. Do not invent configuration attributes or file paths. Use only configuration fields present in bioconfig.py and filesystem paths established by the implementation pattern.\n"
+        "6. Do not emit optional arguments merely because they exist in the app signature. Emit an argument only when the implementation pattern requires it or when the original HP2Net workflow uses it.\n\n"
         f"{few_shot_example}"
     )
     user_prompt = (
-        f"TARGET STEPS: {steps_str}\n"
+        f"SCIENTIFIC WORKFLOW STEPS: {steps_str}\n"
         f"FUNCTION NAME: {workflow_name}\n\n"
+        f"{pattern_instruction}\n\n"
         f"SPECIFICATION RULES:\n{json.dumps(spec.get('rules', []), indent=2)}\n\n"
         f"AVAILABLE APPS CONTRACTS:\n{implementation_context}\n\n"
         f"Generate Python function {workflow_name}:"
@@ -456,7 +755,6 @@ def bucky_quartet_maxcut_snaq(bio_config, basedir, prepare_to_run):
         return f"# AGENT 2 ERROR: Failed to generate Python code: {e}"
 
 def main():
-    """Main CLI execution loop for orchestrating planning, validation, and code synthesis."""
     print("======================================================================")
     print("                PHYLO_AGENT 2 - HP2NET ORCHESTRATOR                   ")
     print("======================================================================\n")
@@ -482,12 +780,24 @@ def main():
     if not proposed_steps:
         print("[ERROR] Agent 1 did not generate a valid step sequence.")
         return
-    valid_endpoints, endpoint_error = validate_endpoints(proposed_steps, requested_tools)
-    if not valid_endpoints:
-        print(f"[REJECTED BY PYTHON VALIDATOR] {endpoint_error}")
-        print("[3/3] Agent 2 skipped.")
-        return
-    print("[2/3] Validating plan against Test KB...")
+
+    graph_resolved_steps = resolve_workflow_path(
+        requested_tools,
+        test_knowledge
+    )
+
+    if graph_resolved_steps:
+        if proposed_steps != graph_resolved_steps:
+            print("[INFO] Agent 1 proposal differs from deterministic graph resolution.")
+            print(f"      Agent 1: {proposed_steps}")
+            print(f"      Graph:   {graph_resolved_steps}")
+        proposed_steps = graph_resolved_steps
+        print(f"[1.5/3] Graph path finding resolved steps: {proposed_steps}")
+    else:
+        print("[1.5/3] No valid path found in target KB graph.")
+        proposed_steps = requested_tools
+
+    print("[2/3] Validating plan against Target KB Graph...")
     validation = validate_composition(proposed_steps, test_knowledge)
     validated_plan = {
         "goal": goal,
@@ -500,23 +810,26 @@ def main():
     print(f"      -> Validation status: {validated_plan['status']} ({validated_plan['execution_status']})")
     print(f"      -> Notes: {validated_plan['implementation_notes']}\n")
     status = validated_plan["status"]
-    if status in ["existing_workflow", "existing_composition"]:
+    if status == "existing_workflow":
         print("[3/3] Agent 2 skipped.")
-        print(f"      -> Workflow already exists and is implemented in the test KB: {validated_plan['implementation_notes']}")
+        print(f"      -> Workflow already exists and is implemented in the target KB: {validated_plan['implementation_notes']}")
         return
     if status != "new_supported_workflow":
         print("[3/3] Agent 2 skipped.")
-        print("      -> Composition is not supported by the test KB.")
+        print("      -> Composition is not supported by the target KB graph.")
         return
+    pattern = resolve_implementation_pattern(proposed_steps)
+    if pattern:
+        print(f"[2.5/3] Resolved HP2Net implementation pattern: {pattern['apps']}\n")
     print("[3/3] Running Agent 2 (Parsl Code Generator)...")
     implementation_context = load_apps_context()
     generated_code = run_agent2_test_generator(
         validated_plan,
-        test_knowledge,
+        pattern,
         IMPLEMENTATION_SPEC,
         implementation_context
     )
-    all_passed, checks, err_msg = validate_generated_code(generated_code, proposed_steps)
+    all_passed, checks, err_msg = validate_generated_code(generated_code, proposed_steps, pattern)
     print("Code Validation:")
     for check_name, check_status in checks.items():
         print(f"  {check_name}: {check_status}")
