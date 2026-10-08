@@ -91,7 +91,7 @@
       "producer": "root_tree",
       "consumer": "PhyloNet",
       "supported": true
-
+    }
   ],
   "workflows": {
     "raxml_astral_snaq": {
