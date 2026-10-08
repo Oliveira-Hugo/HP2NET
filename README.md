@@ -1,26 +1,54 @@
 # High Performance Phylogenetic Network (HP2NET) framework
 ### Framework for construction of phylogenetic networks on High Performance Computing (HPC) environment
 
-## This fork: LLM-based workflow planning
+## This fork: LLM-based workflow planning and generation
 
-This fork extends HP2NET with an LLM-based scientific workflow planner (preliminary implementation). The agent translates natural-language phylogenetic requests into structured sequences of HP2NET tools and validates the proposed workflow against the available tools, workflow compositions, and interfaces described in the `knowledge/` directory.
+This fork extends HP2NET with a preliminary LLM-driven system for semantic workflow planning and Parsl code generation. It translates natural-language requests into validated HP2NET workflow pipelines while preventing the LLM from inventing unsupported scientific compositions, tools, or external APIs.
 
-The original HP2NET workflows remain unchanged. The main addition is `phylo_agent.py`, together with the HP2NET knowledge base in `knowledge/hp2net_knowledge.json`.
+### New files
 
-### Running the workflow planner
+* **`phylo_agent.py`**: Agent 1, the Semantic Planner. Translates natural-language requests into canonical HP2NET tool sequences, including required intermediate steps such as `ASTRAL` between `RAxML` and `SNaQ`.
 
-The planner requires a local [Ollama](https://ollama.com/) installation with the configured model available. By default, it uses:
+* **`phylo_agent2.py`**: Agent 2, the Parsl Code Generator and Validator. Performs deterministic graph resolution, target knowledge-base validation, implementation-pattern selection, Parsl code generation, and static AST validation.
 
-```python
-MODEL = "llama3.1:8b"
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+* **`knowledge/hp2net_knowledge.json`**: Original HP2NET knowledge base used by Agent 1. Describes available tools, interfaces, workflow rules, and existing workflows.
+
+* **`knowledge/test_knowledge.json`**: Target knowledge base used for deterministic validation. Distinguishes between implemented workflows, supported-but-unimplemented compositions, and unsupported compositions.
+
+### How to Run
+
+Both agents require a local [Ollama](https://ollama.com/) instance running the `llama3.1:8b` model.
+
+Run the complete planning, validation, and code-generation pipeline from the project root:
+
+```bash
+python3 phylo_agent2.py
 ```
-From the project root, run:
 
-```python
-python3 phylo_agent.py
-```
-The planner receives a natural-language scientific request, uses the HP2NET knowledge base to identify relevant tools and workflows, asks the local LLM to construct the workflow, and validates the resulting sequence against the documented HP2NET capabilities.
+### Current Validation Status
+
+Validation currently checks Python AST validity, required HP2NET applications, absence of unauthorized applications, application signatures, implementation patterns, and workflow structure.
+
+#### Existing Workflows — Code Generation Skipped
+- RAxML → ASTRAL → SNaQ
+- RAxML → root_tree → PhyloNet
+- IQ-TREE → ASTRAL → SNaQ
+- IQ-TREE → root_tree → PhyloNet
+- MrBayes → MBSUM → BUCKy → Quartet MaxCut → SNaQ
+
+#### New Supported Compositions
+- RAxML → ASTRAL
+- BUCKy → Quartet MaxCut → SNaQ
+
+#### Unsupported Compositions — Deterministically Rejected
+- MrBayes → PhyloNet
+
+This composition is rejected because no valid interface path exists in the target workflow graph.
+
+### Limitations
+- Static validation only: Generated functions pass structural, AST, application-signature, and implementation-pattern checks, but have not yet been executed within the live HP2NET/Parsl runtime.
+- Manual knowledge-base maintenance: Tool interfaces, graph dependencies, supported compositions, and implementation patterns are explicitly declared in knowledge/.
+- Preliminary implementation: The current system performs workflow planning, validation, and Parsl code generation. Runtime execution of newly generated workflows on HP2NET/HPC is the next development stage.
 
 ## Introduction
 
